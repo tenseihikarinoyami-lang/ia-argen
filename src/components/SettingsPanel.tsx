@@ -755,7 +755,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         ];
         const isValidSymbol = (sym) => {
             if (!sym) return false;
-            const clean = sym.toUpperCase().trim().replace(/[\s()]/g, "");
+            const clean = sym.toUpperCase().trim().replace(/[\\s()]/g, "");
             for (const w of blacklistedWords) {
                 if (clean === w || clean.includes(w)) return false;
             }
@@ -773,46 +773,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         // Persistent cache to preserve previous validated asset state during transient loading phases
         let lastKnownAsset = "EUR/USD (OTC)";
 
-        const getLivePrice = (symbol) => {
-            if (!symbol) return null;
-            let isCrypto = symbol.includes("BTC") || symbol.includes("ETH") || symbol.includes("LTC") || symbol.includes("XRP") || symbol.includes("SOL");
-            let isJpy = symbol.includes("JPY");
-            let isCop = symbol.includes("COP");
-            let isIdr = symbol.includes("IDR");
-            let isVnd = symbol.includes("VND");
-            let isInr = symbol.includes("INR");
-            let isPhp = symbol.includes("PHP");
-            let isArs = symbol.includes("ARS");
-            let isBrl = symbol.includes("BRL");
-            let isRub = symbol.includes("RUB");
-            let isMxn = symbol.includes("MXN");
-            let isGold = symbol.includes("GOLD") || symbol.includes("SILVER") || symbol.includes("PLATINUM") || symbol.includes("COPPER");
-            
-            let minVal = 0.05, maxVal = 5.0;
-            
-            if (isCrypto) {
-                minVal = 0.1;
-                maxVal = 200000;
-            } else if (isJpy || isRub || isInr || isPhp || isMxn) {
-                minVal = 5;
-                maxVal = 500;
-            } else if (isBrl) {
-                minVal = 1.5;
-                maxVal = 15;
-            } else if (isGold) {
-                minVal = 10;
-                maxVal = 10000;
-            } else if (isIdr || isVnd || isCop) {
-                minVal = 500;
-                maxVal = 100000;
-            } else if (isArs) {
-                minVal = 50;
-                maxVal = 5000;
-            } else {
-                minVal = 0.0001;
-                maxVal = 10000;
-            }
-
+        const getLivePrice = () => {
             const specificSelectors = [
                 '.chart-container .price-label',
                 '[class*="price-label"]',
@@ -829,7 +790,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             ];
 
             const isValidPrice = (val, rawText) => {
-                if (isNaN(val) || val < minVal || val > maxVal) return false;
+                if (isNaN(val) || val <= 0 || val > 1000000) return false;
                 if (rawText.includes('%') || rawText.includes(':') || rawText.includes('$') || rawText.toLowerCase().includes('demo') || rawText.toLowerCase().includes('live')) return false;
                 if (!rawText.includes('.')) return false;
                 return true;
@@ -852,25 +813,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 } catch(e) {}
             }
 
+            // High priority lightweight fallback selectors
             try {
                 const candidates = document.querySelectorAll('[class*="price"], [class*="ticker"], [class*="value"]');
                 for (const el of candidates) {
                     if (!el || el.children.length > 1) continue;
-                    if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
-                    const txt = (el.textContent || "").trim();
-                    const cleanStr = txt.replace(/[^0-9.]/g, '');
-                    if (!cleanStr) continue;
-                    const val = parseFloat(cleanStr);
-                    if (isValidPrice(val, txt)) {
-                        return val;
-                    }
-                }
-            } catch(e) {}
-
-            try {
-                const elements = document.querySelectorAll('span, div, button, b, strong');
-                for (const el of elements) {
-                    if (!el || el.children.length > 0) continue;
                     if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
                     const txt = (el.textContent || "").trim();
                     const cleanStr = txt.replace(/[^0-9.]/g, '');
@@ -984,28 +931,6 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                         }
                     }
 
-                    // Try 5: General visible element fallback scanning (excluding menus and tab-nested divs)
-                    try {
-                        const isAssetListOpen = !!document.querySelector('.asset-list, .assets-list, .select-list, .dropdown, .menu, .popup, .modal, [class*="modal"], [class*="popup"]');
-                        const elements = Array.from(document.querySelectorAll('.active, .current, [class*="active"], [class*="current"], [class*="selected"], button, div, span, strong'));
-                        for (const el of elements) {
-                            if (el && el.textContent) {
-                                if (!isAssetListOpen && el.closest('.asset-list, .assets-list, .dropdown, .menu, .popup, .modal, .select-list, .modal-dialog, [class*="modal"], [class*="popup"], [class*="menu"], [class*="dropdown"], .tabs__item, [class*="tab-item"]')) {
-                                    continue;
-                                }
-                                if (!(el.offsetWidth > 0 || el.offsetHeight > 0)) continue;
-
-                                const text = el.textContent.trim().replace(/\\s+/g, ' ');
-                                if (text.length > 5 && text.length < 25) {
-                                    const match = text.match(assetRegex);
-                                    if (match && isValidSymbol(match[0])) {
-                                        return match[0].toUpperCase();
-                                    }
-                                }
-                            }
-                        }
-                    } catch (err) {}
-
                     return null;
                 };
 
@@ -1118,9 +1043,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
                 // Prioritize live intercepted WebSocket telemetry to ensure flawless, real-time data sync with NO discrepancy
                 const finalAsset = (liveInterceptedAsset !== null) ? liveInterceptedAsset : lastKnownAsset;
-                const currentPrice = (liveInterceptedPrice !== null) ? liveInterceptedPrice : getLivePrice(finalAsset);
+                const currentPrice = (liveInterceptedPrice !== null) ? liveInterceptedPrice : getLivePrice();
                 const finalBalance = (liveInterceptedBalance !== null) ? liveInterceptedBalance : cleanedBalance;
                 const finalIsDemo = (liveInterceptedIsDemo !== null) ? liveInterceptedIsDemo : isDemo;
+
+                console.log("📡 [Argentum Sync] Sincronizando -> Activo: " + finalAsset + " | Precio: " + currentPrice + " | Balance: " + finalBalance + " | Demo: " + finalIsDemo);
 
                 socket.send(JSON.stringify({
                     type: "QUOTEX_SYNC",
