@@ -1,0 +1,6 @@
+{
+  "name": "Quotex AI Trading Bot Analyst",
+  "description": "Sistema avanzado de análisis técnico con IA para Quotex. Genera señales y ejecuta operaciones automáticas/semiautomáticas mediante indicadores custom y enlace de automatización por WebSocket.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

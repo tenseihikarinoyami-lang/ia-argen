@@ -1,0 +1,133 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default deny everything
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Validation Blueprint for UserProfile
+    function isValidUserProfile(data) {
+      return data.userId is string 
+          && data.userId.size() <= 128
+          && data.userId == request.auth.uid
+          && data.email is string
+          && data.email.size() <= 128
+          && data.balance is number
+          && data.balance >= 0.0
+          && data.settings is map
+          && data.keys().hasAll(['userId', 'email', 'createdAt', 'balance', 'settings'])
+          && data.keys().size() <= 8;
+    }
+
+    // Validation Blueprint for UserTrade
+    function isValidUserTrade(data) {
+      return data.id is string
+          && data.id.size() <= 128
+          && data.userId is string
+          && data.userId == request.auth.uid
+          && data.symbol is string
+          && data.symbol.size() <= 32
+          && data.type is string
+          && (data.type == 'CALL' || data.type == 'PUT')
+          && data.amount is number
+          && data.amount > 0.0
+          && data.entryPrice is number
+          && data.entryPrice >= 0.0
+          && data.entryTime is int
+          && data.expiry is int
+          && data.expiry >= 0
+          && data.status is string
+          && (data.status == 'PENDING' || data.status == 'WIN' || data.status == 'LOSS')
+          && data.payout is number
+          && data.mode is string
+          && (data.mode == 'manual' || data.mode == 'semiautomatic' || data.mode == 'automatic')
+          && data.keys().hasAll(['id', 'userId', 'symbol', 'type', 'amount', 'entryPrice', 'entryTime', 'expiry', 'status', 'payout', 'mode'])
+          && data.keys().size() <= 16;
+    }
+
+    // User Profile Document Access
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if isOwner(userId);
+      
+      allow create: if isOwner(userId) 
+                    && isValidId(userId)
+                    && isValidUserProfile(incoming()) 
+                    // Verify correct creation timestamp is used
+                    && incoming().createdAt == request.time;
+                    
+      allow update: if isOwner(userId)
+                    && isValidId(userId)
+                    && isValidUserProfile(incoming())
+                    // Immutability checks
+                    && incoming().userId == existing().userId
+                    && incoming().createdAt == existing().createdAt
+                    && (
+                      // Profile settings update
+                      incoming().diff(existing()).affectedKeys().hasOnly(['settings', 'balance', 'updatedAt'])
+                    );
+                    
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      // User Trades Subcollection Access (Relational protection)
+      match /trades/{tradeId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(tradeId);
+        allow list: if isOwner(userId) && isValidId(userId);
+        
+        allow create: if isOwner(userId)
+                      && isValidId(userId)
+                      && isValidId(tradeId)
+                      && isValidUserTrade(incoming())
+                      && incoming().userId == userId;
+                      
+        allow update: if isOwner(userId)
+                      && isValidId(userId)
+                      && isValidId(tradeId)
+                      && isValidUserTrade(incoming())
+                      // Immutability safeguards
+                      && incoming().id == existing().id
+                      && incoming().userId == existing().userId
+                      && incoming().symbol == existing().symbol
+                      && incoming().type == existing().type
+                      && incoming().amount == existing().amount
+                      && incoming().entryPrice == existing().entryPrice
+                      && incoming().entryTime == existing().entryTime
+                      && incoming().expiry == existing().expiry
+                      && (
+                        // Protect terminal states: once determined, status can't change
+                        existing().status == 'PENDING'
+                      )
+                      && (
+                        // Action updates: complete/resolve trade result
+                        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'exitPrice', 'exitTime', 'profit', 'aiReasoning'])
+                      );
+                      
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(tradeId);
+      }
+    }
+
+  }
+}

@@ -1,0 +1,127 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User account profile storing individual configuration and balance data.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The unique Firebase Authentication UID of the user."
+        },
+        "email": {
+          "type": "string",
+          "description": "The user's account email."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp indicating document creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp indicating document updating."
+        },
+        "balance": {
+          "type": "number",
+          "description": "User specific synchronized capital or virtual balance."
+        },
+        "settings": {
+          "type": "object",
+          "description": "Complete localized SystemSettings mapping for indicator periods and trade parameters."
+        }
+      },
+      "required": ["userId", "email", "createdAt", "balance", "settings"]
+    },
+    "UserTrade": {
+      "title": "UserTrade",
+      "description": "Individual technical operation execute or pending record to prevent cross-account leaks.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier of the trade."
+        },
+        "userId": {
+          "type": "string",
+          "description": "UID of the owner."
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Financial asset code (e.g. EUR/USD)."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["CALL", "PUT"],
+          "description": "Type direction of the order."
+        },
+        "amount": {
+          "type": "number",
+          "description": "Financial exposure size of this specific purchase."
+        },
+        "entryPrice": {
+          "type": "number",
+          "description": "Ticker price at entry coordinate."
+        },
+        "exitPrice": {
+          "type": "number",
+          "description": "Ticker price at expiry resolution."
+        },
+        "entryTime": {
+          "type": "number",
+          "description": "Epoch millisecond entry stamp."
+        },
+        "exitTime": {
+          "type": "number",
+          "description": "Epoch millisecond exit stamp."
+        },
+        "expiry": {
+          "type": "number",
+          "description": "Requested active cycle expiry window span in seconds."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["PENDING", "WIN", "LOSS"],
+          "description": "Ultimate trade resolution state."
+        },
+        "payout": {
+          "type": "number",
+          "description": "Percentage profit return modifier."
+        },
+        "profit": {
+          "type": "number",
+          "description": "Financial outcome result delta of wins or losses."
+        },
+        "aiReasoning": {
+          "type": "string",
+          "description": "Optional AI analysis rationale recorded."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["manual", "semiautomatic", "automatic"],
+          "description": "Operation mode used when entering the trade."
+        },
+        "isMartingale": {
+          "type": "boolean",
+          "description": "Toggles if this represents a recovery martingale step."
+        },
+        "martingaleStep": {
+          "type": "number",
+          "description": "Integer index of the current active martingale stage."
+        }
+      },
+      "required": ["id", "userId", "symbol", "type", "amount", "entryPrice", "entryTime", "expiry", "status", "payout", "mode"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Main document collection storing validated configuration states, specific to the owner."
+    },
+    "/users/{userId}/trades/{tradeId}": {
+      "schema": "UserTrade",
+      "description": "Isolated subcollection tracking full trading history, private to the specific authenticated account."
+    }
+  }
+}
