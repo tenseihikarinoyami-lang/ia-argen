@@ -90,7 +90,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const tampermonkeyScript = `// ==UserScript==
 // @name         Quotex AI Auto-Trader Bot Link (Modo Estricto)
 // @namespace    http://tampermonkey.net/
-// @version      3.9
+// @version      4.0
 // @description  Conecta la plataforma Quotex con Argentum AI por WebSockets con humanización estricta y protección anti-detección avanzada.
 // @author       Argentum AI
 // @match        *://*.qxbroker.com/*
@@ -111,12 +111,23 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 // @match        *://qx-trade.com/*
 // @match        *://*.qxbroker.site/*
 // @match        *://qxbroker.site/*
+// @match        *://*quotex*/*
+// @match        *://*qxbroker*/*
+// @match        *://*qx-trade*/*
+// @match        *://*qx-platform*/*
+// @match        *://*qxbroker*/*
+// @match        *://*qx-*/*
+// @match        *://*quotx*/*
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
 
 (function() {
     'use strict';
+
+    const host = window.location.hostname.toLowerCase();
+    const isQuotex = host.includes("quotex") || host.includes("qxbroker") || host.includes("qx-") || host.includes("qx") || host.includes("quotx") || host.includes("broker");
+    if (!isQuotex) return;
 
     console.log("🦾 [Argentum Estricto] Inicializado con éxito. Protecciones Anti-Detección ACTIVAS.");
 
@@ -128,23 +139,31 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
     function normalizeSymbol(sym) {
         if (!sym) return "";
-        let clean = sym.toUpperCase().replace(/[^A-Z]/g, ""); // "EURUSD"
-        let isOtc = sym.toUpperCase().includes("OTC") || sym.toLowerCase().includes("otc") || sym.toLowerCase().includes("_otc");
+        let upper = sym.toUpperCase();
+        let isOtc = upper.includes("OTC") || upper.includes("_OTC") || upper.includes("-OTC");
         
-        // Si es un par FX estandar de 6 letras
-        if (clean.length === 6) {
-            const pair = clean.substring(0, 3) + "/" + clean.substring(3, 6);
+        // Extraer y procesar pares estandar FX de 6 letras sin interferencia de OTC
+        let cleanFX = upper.replace("OTC", "").replace(/[^A-Z]/g, "");
+        if (cleanFX.length === 6) {
+            const pair = cleanFX.substring(0, 3) + "/" + cleanFX.substring(3, 6);
             return pair + (isOtc ? " (OTC)" : "");
         }
         
-        let base = sym.toUpperCase().trim()
-                      .replace("_OTC", "")
-                      .replace("-OTC", "")
-                      .replace(" OTC", "")
-                      .replace("(OTC)", "")
-                      .replace("_", "/")
-                      .trim();
-                      
+        let base = upper.trim()
+                       .replace(/_OTC/g, "")
+                       .replace(/-OTC/g, "")
+                       .replace(/\s*OTC/g, "")
+                       .replace(/\(OTC\)/g, "")
+                       .trim();
+                       
+        if (base.length === 6 && !base.includes("/")) {
+            base = base.substring(0, 3) + "/" + base.substring(3, 6);
+        } else if (base.includes("_")) {
+            base = base.replace("_", "/");
+        } else if (base.includes("-")) {
+            base = base.replace("-", "/");
+        }
+        
         return base + (isOtc ? " (OTC)" : "");
     }
 
@@ -195,7 +214,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
         // 2. PARSEO JSON ESTÁNDAR
         let rawJsonContent = rawString;
-        const match = rawString.match(/^(\\\\d+)(.*)$/);
+        const match = rawString.match(/^([0-9]+)(.*)$/);
         if (match) {
             rawJsonContent = match[2];
         }
@@ -737,35 +756,20 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                         }
                     }, 450);
 
-                }, 300);
-            }
-        } catch (err) {
-            console.error("❌ Fallo en la rutina de cambio de activo en Quotex:", err);
-        }
-    }
-
-    // 5. Telemetry screen synchronizer (Sends live actual balance and current active asset)
+                    // 5. Telemetry screen synchronizer (Sends live actual balance and current active asset)
     function startQuotexScreenSync() {
-        const assetRegex = new RegExp("(([A-Z]{3,4})[_/\\\\-]([A-Z]{3,4})(?:\\\\s*\\\\(OTC\\\\))?)|(([A-Z]{2,12})\\\\s*\\\\(OTC\\\\))|((?:GOLD|SILVER|PLATINUM|COPPER|NASDAQ|SPX|DOWJONES|APPLE|BOEING|INTEL|FACEBOOK|GOOGLE|AMAZON|MICROSOFT)(?:\\\\s*\\\\(OTC\\\\))?)", "i");
         const blacklistedWords = [
             "TRADE", "TRADING", "MARKET", "ACCOUNT", "DEMO", "SUPPORT", "TOURNAMENT", "TOURNAMENTS", 
             "TOURNA", "OURNA", "MENT", "MORE", "LOGIN", "INDEX", "STATUS", "PROFILE", "DRAWER", "SETTINGS", 
             "HELP", "LIVE", "BONUS", "DEPOSIT", "WITHDRAWAL", "PENDING", "TRADES", "UP", "DOWN", "CALL", 
             "PUT", "SIGNAL", "CHART"
         ];
+
         const isValidSymbol = (sym) => {
             if (!sym) return false;
-            const clean = sym.toUpperCase().trim().replace(/[\\s()]/g, "");
+            const clean = sym.toUpperCase().trim().replace(/[\s()]/g, "");
             for (const w of blacklistedWords) {
                 if (clean === w || clean.includes(w)) return false;
-            }
-            const parts = clean.split(/[_/\\-]/);
-            if (parts.length === 2) {
-                const part0 = parts[0].replace("OTC", "");
-                const part1 = parts[1].replace("OTC", "");
-                if (part0.length < 3 || part0.length > 4 || part1.length < 3 || part1.length > 4) {
-                    return false;
-                }
             }
             return true;
         };
@@ -842,27 +846,18 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 const getActiveAsset = () => {
                     // Try 1: Scan active tabs if multiple tabs exist
                     try {
-                        const tabs = Array.from(document.querySelectorAll('.tabs__item, [class*="tab-item"]'));
-                        if (tabs.length > 0) {
-                            const activeTab = tabs.find(el => {
-                                const className = (el.className || "").toLowerCase();
-                                return className.includes('active') || 
-                                       className.includes('selected') || 
-                                       className.includes('current') || 
-                                       el.getAttribute('aria-selected') === 'true';
-                            });
-
-                            if (activeTab && activeTab.textContent) {
-                                const text = activeTab.textContent.trim().replace(/\\s+/g, ' ');
-                                const match = text.match(assetRegex);
-                                if (match && isValidSymbol(match[0])) {
-                                    return match[0].toUpperCase();
-                                }
+                        const activeTab = document.querySelector('.tabs__item_active, .tabs__item.active, [class*="tabs__item"][class*="active"], [class*="tab-active"], .tab-active');
+                        if (activeTab) {
+                            const nameEl = activeTab.querySelector('.tabs__item-name, [class*="name"], span');
+                            const rawText = (nameEl ? nameEl.textContent : activeTab.textContent) || "";
+                            const cleanText = rawText.trim().toUpperCase().replace(/\\s+/g, ' ');
+                            if (cleanText && cleanText.length >= 6 && cleanText.length <= 18) {
+                                return cleanText;
                             }
                         }
                     } catch (err) {}
 
-                    // Try 2: Scan selective high-priority active CSS selectors
+                    // Try 2: Scan selective active CSS selectors
                     const selectiveSelectors = [
                         '.tabs__item_active', 
                         '.tabs__item--active',
@@ -873,61 +868,32 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                         '.active-asset', 
                         '.current-asset',
                         '.tabs__item_active .tabs__item-name',
-                        '.tabs__item.active .tabs__item-name'
+                        '.tabs__item.active .tabs__item-name',
+                        '.asset-select__button', 
+                        '.asset-select__title',
+                        '.asset-select'
                     ];
                     for (const sel of selectiveSelectors) {
                         try {
-                            const candidates = document.querySelectorAll(sel);
-                            for (const el of candidates) {
-                                if (el && el.textContent) {
-                                    let isVisible = el.offsetWidth > 0 || el.offsetHeight > 0;
-                                    if (isVisible) {
-                                        const text = el.textContent.trim().replace(/\\s+/g, ' ');
-                                        const match = text.match(assetRegex);
-                                        if (match && isValidSymbol(match[0])) {
-                                            return match[0].toUpperCase();
-                                        }
+                            const el = document.querySelector(sel);
+                            if (el && el.textContent) {
+                                let isVisible = el.offsetWidth > 0 || el.offsetHeight > 0;
+                                if (isVisible) {
+                                    const text = el.textContent.trim().toUpperCase().replace(/\\s+/g, ' ');
+                                    if (text && text.length >= 6 && text.length <= 18) {
+                                        return text;
                                     }
                                 }
                             }
                         } catch (err) {}
                     }
 
-                    // Try 3: Scan main asset select controls, excluding elements nested inside some other tab to prevent matching inactive tab controls
-                    const mainSelectors = [
-                        '.asset-select__button', 
-                        '.asset-select__title',
-                        '.asset-select',
-                        'button[class*="asset-select"]',
-                        'div[class*="asset-select"]'
-                    ];
-                    for (const sel of mainSelectors) {
-                        try {
-                            const candidates = document.querySelectorAll(sel);
-                            for (const el of candidates) {
-                                if (el.closest('.tabs__item, [class*="tab-item"]')) {
-                                    continue; // Bypass selectors inside tabs
-                                }
-                                if (el && el.textContent) {
-                                    let isVisible = el.offsetWidth > 0 || el.offsetHeight > 0;
-                                    if (isVisible) {
-                                        const text = el.textContent.trim().replace(/\\s+/g, ' ');
-                                        const match = text.match(assetRegex);
-                                        if (match && isValidSymbol(match[0])) {
-                                            return match[0].toUpperCase();
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (err) {}
-                    }
-
-                    // Try 4: Check document title
+                    // Try 3: Document title
                     if (typeof document !== 'undefined' && document.title) {
-                        const cleanTitle = document.title.toUpperCase();
-                        const titleMatch = cleanTitle.match(assetRegex);
-                        if (titleMatch && isValidSymbol(titleMatch[0])) {
-                            return titleMatch[0].toUpperCase();
+                        const titleStr = document.title.toUpperCase();
+                        const match = titleStr.match(/([A-Z]{3}[\\/_-]?[A-Z]{3}(\\s*\\(?OTC\\)?)?)/i);
+                        if (match) {
+                            return match[1].trim().toUpperCase();
                         }
                     }
 
@@ -949,14 +915,18 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 let foundBalanceText = "";
                 const balanceSelectors = [
                     '.header__balance-val', 
-                    '.header__balance', 
+                    '.header__balance-value',
+                    '.header__balance .value',
+                    '.header__active-balance',
                     '.account-balance', 
                     '.balance-value', 
                     '.user-balance',
                     '.header__demo',
                     '.header__live',
+                    '.header__balance',
                     '[class*="balance-val"]',
-                    '[class*="balance"]'
+                    '[class*="balance"]',
+                    '.balance'
                 ];
                 
                 for (const sel of balanceSelectors) {
@@ -964,13 +934,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                         const candidates = document.querySelectorAll(sel);
                         for (const el of candidates) {
                             if (el && el.textContent) {
-                                // EXTREMELY CRITICAL: Ignore any balance information inside popups, menus, or dropdown structures
-                                // as those represent static options, refill dialogs (often displaying $10,000.00), or non-live list items
-                                if (el.closest('.dropdown, .menu, .popup, .modal, .usermenu, .account-select__dropdown, .select-list, .balance-selector, .user-menu, .modal-dialog')) {
+                                // Exclude actual choice selectors or dialog models only
+                                if (el.closest('.modal, .popup, .account-select__dropdown, .select-list, .modal-dialog, .dropdown, .menu')) {
                                     continue;
                                 }
                                 const txt = el.textContent.trim();
-                                if (txt && /\\d+/.test(txt) && (txt.includes('$') || txt.includes('€') || txt.includes('£') || txt.includes('R$') || txt.toLowerCase().includes('demo') || txt.toLowerCase().includes('live'))) {
+                                if (txt && /[0-9]/.test(txt)) {
                                     foundBalanceText = txt;
                                     break;
                                 }
@@ -980,21 +949,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     } catch (err) {}
                 }
                 
-                // Fallback scan: deep string search across visible flat nodes (excluding menus/modal container matches)
+                // Fallback scan: Search inside the main header or top bar string
                 if (!foundBalanceText) {
                     try {
-                        const elements = Array.from(document.querySelectorAll('button, div, span, a, p, strong'));
-                        for (const el of elements) {
-                            if (el.closest('.dropdown, .menu, .popup, .modal, .usermenu, .account-select__dropdown, .select-list, .balance-selector, .user-menu, .modal-dialog')) {
-                                continue;
-                            }
-                            const txt = (el.textContent || "").trim();
-                            if (txt.length > 2 && txt.length < 35 && !txt.includes('%') && !txt.includes(':') && !txt.includes('min')) {
-                                const hasCurrencyFormat = /([\\$€£¥]\\s*\\d+[\\d,.]*)|(\\d+[\\d,.]*\\s*([\\$€£¥]|USD|EUR|BRL|GBP|DEMO))/i.test(txt);
-                                if (hasCurrencyFormat) {
-                                    foundBalanceText = txt;
-                                    break;
-                                }
+                        const header = document.querySelector('header, .header, .header__right, .user-panel, [class*="header"]');
+                        if (header && header.textContent) {
+                            const txt = header.textContent;
+                            // Match demo/real plus currency signs followed by digits
+                            const match = txt.match(/(?:DEMO|REAL|LIVE)?\\s*[\\$€£R]?\\s*[0-9]+[0-9,.]*/i);
+                            if (match) {
+                                foundBalanceText = match[0];
                             }
                         }
                     } catch (err) {}
@@ -1003,7 +967,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 // Analyze balance and clean decimal signs
                 let cleanedBalance = 10000.00;
                 if (foundBalanceText) {
-                    let clean = foundBalanceText.replace(/[^\\d.,]/g, '');
+                    let clean = foundBalanceText.replace(/[^0-9.,]/g, '');
                     if (clean.includes('.') && clean.includes(',')) {
                         if (clean.indexOf('.') < clean.indexOf(',')) {
                             clean = clean.replace(/\\./g, '').replace(/,/g, '.');
@@ -1018,19 +982,28 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                             clean = clean.replace(/,/g, '');
                         }
                     }
-                    const numMatch = clean.match(/[\\d.]+/);
+                    const numMatch = clean.match(/[0-9.]+/);
                     if (numMatch) {
                         cleanedBalance = parseFloat(numMatch[0]) || 10000.00;
                     }
                 }
 
-                // Try to identify account mode (Live vs Demo)
-                const pageText = document.body.innerText.toUpperCase();
+                // Try to identify account mode (Live vs Demo) safely without expensive innerText reflows
                 let isDemo = true;
-                if (window.location.href.includes("demo-trade")) {
+                if (window.location.href.includes("demo-trade") || window.location.href.includes("demo")) {
                     isDemo = true;
-                } else if (window.location.href.includes("trade") || pageText.includes("REAL") || pageText.includes("LIVE") || pageText.includes("SOPORTE")) {
+                } else if (window.location.href.includes("real-trade") || window.location.href.includes("trade") || window.location.href.includes("live")) {
                     isDemo = false;
+                } else {
+                    try {
+                        const header = document.querySelector('header, .header, .header__right, .user-panel, [class*="header"]');
+                        if (header && header.textContent) {
+                            const txt = header.textContent.toUpperCase();
+                            if (txt.includes('REAL') || txt.includes('LIVE')) {
+                                isDemo = false;
+                            }
+                        }
+                    } catch (e) {}
                 }
 
                 // Double check demo indicator - if the balance has the word DEMO, or we see demo texts on header

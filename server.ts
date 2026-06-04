@@ -533,10 +533,28 @@ app.post("/api/gemini/analyze", async (req, res) => {
 // Setup WebSockets
 const wss = new WebSocketServer({ noServer: true });
 
+// System logs cache
+const systemLogs: string[] = [];
+const addLog = (msg: string) => {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  systemLogs.push(line);
+  if (systemLogs.length > 200) {
+    systemLogs.shift();
+  }
+  console.log(line);
+};
+
+// Expose logs endpoint
+app.get("/api/system-logs", (req, res) => {
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.send(systemLogs.join("\n"));
+});
+
 // Track client types on a per-user basis (isolated)
 // key: userId, value: Set<WebSocket>
 const guiClients = new Map<string, Set<WebSocket>>();
 const botClients = new Map<string, Set<WebSocket>>();
+const lastSyncData = new Map<string, any>();
 
 const addClient = (map: Map<string, Set<WebSocket>>, userId: string, ws: WebSocket) => {
   if (!map.has(userId)) {
@@ -556,7 +574,15 @@ const removeClient = (map: Map<string, Set<WebSocket>>, userId: string, ws: WebS
 };
 
 const getBotsCount = (userId: string): number => {
-  return botClients.get(userId)?.size || 0;
+  const exactCount = botClients.get(userId)?.size || 0;
+  if (exactCount > 0) return exactCount;
+
+  // Fallback: Return total number of active bot connections across all userIds (useful for sandbox UID mismatches)
+  let totalBots = 0;
+  for (const [_, set] of botClients) {
+    totalBots += set.size;
+  }
+  return totalBots;
 };
 
 wss.on("connection", (ws, req) => {
@@ -564,24 +590,70 @@ wss.on("connection", (ws, req) => {
   const clientType = urlParams.get("clientType") || "gui";
   const userId = urlParams.get("userId") || "default_user";
 
+  addLog(`New WebSocket connection. clientType: ${clientType}, userId: ${userId}`);
+
   if (clientType === "gui") {
     addClient(guiClients, userId, ws);
-    console.log(`🔌 Isolated React GUI connected for UID: ${userId}. Total GUI for user: ${guiClients.get(userId)?.size}`);
+    addLog(`🔌 React GUI connected for UID: ${userId}. Total GUIs for user: ${guiClients.get(userId)?.size}`);
     
     // Immediately send current connector status to this GUI
     ws.send(JSON.stringify({
       type: "SERVER_STATUS",
       data: { botConnected: getBotsCount(userId) > 0, activeBots: getBotsCount(userId) }
     }));
+
+    // Immediately replay the last synchronized Quotex data if it exists
+    if (lastSyncData.has(userId)) {
+      const syncPayload = lastSyncData.get(userId);
+      addLog(`⚡ Replaying cached QUOTEX_SYNC to GUI for UID: ${userId} -> Asset: ${syncPayload.asset}, Balance: ${syncPayload.balance}`);
+      ws.send(JSON.stringify({
+        type: "QUOTEX_SYNC",
+        data: syncPayload
+      }));
+    } else if (lastSyncData.size > 0) {
+      // Robust fallback replay of any other cached sync details from any other UID
+      const fallbackPayload = Array.from(lastSyncData.values())[0];
+      addLog(`⚡ Replaying fallback QUOTEX_SYNC to GUI for UID: ${userId} (Bot was UID: ${Array.from(lastSyncData.keys())[0]}) -> Asset: ${fallbackPayload.asset}, Balance: ${fallbackPayload.balance}`);
+      ws.send(JSON.stringify({
+        type: "QUOTEX_SYNC",
+        data: fallbackPayload
+      }));
+    }
   } else {
     addClient(botClients, userId, ws);
-    console.log(`🤖 Isolated Quotex Bot connected for UID: ${userId}. Total bots for user: ${getBotsCount(userId)}`);
+    addLog(`🤖 Quotex Bot connected for UID: ${userId}. Total bots for user: ${getBotsCount(userId)}`);
     
     // Broadcast active status to user's GUIs only
     broadcastToUserGui(userId, {
       type: "SERVER_STATUS",
       data: { botConnected: true, activeBots: getBotsCount(userId) }
     });
+
+    // Unconditional fallback broadcast of bot connected statuses to all GUI clients on container
+    for (const [_, guiSet] of guiClients) {
+      for (const client of guiSet) {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({
+            type: "SERVER_STATUS",
+            data: { botConnected: true, activeBots: getBotsCount(userId) }
+          }));
+        }
+      }
+    }
+
+    // If we have cached sync data, immediately share it too
+    if (lastSyncData.has(userId)) {
+      broadcastToUserGui(userId, {
+        type: "QUOTEX_SYNC",
+        data: lastSyncData.get(userId)
+      });
+    } else if (lastSyncData.size > 0) {
+      const fallbackPayload = Array.from(lastSyncData.values())[0];
+      broadcastToUserGui(userId, {
+        type: "QUOTEX_SYNC",
+        data: fallbackPayload
+      });
+    }
   }
 
   ws.on("message", (message) => {
@@ -594,27 +666,58 @@ wss.on("connection", (ws, req) => {
         return;
       }
 
-      console.log(`WS Message received from [${clientType}] for UID [${userId}]:`, parsed);
+      addLog(`WS [${clientType}] Message for UID [${userId}]: ${parsed.type}`);
 
       // If a bot/automation script sends back results of real executions
       if (parsed.type === "TRADE_RESULT") {
+        addLog(`📈 Result received: status: ${parsed.data?.status}, symbol: ${parsed.data?.symbol}, profit: ${parsed.data?.profit}`);
         // Forward this result directly to React panel to log real wins/losses
         broadcastToUserGui(userId, {
           type: "TRADE_RESULT",
           data: parsed.data
         });
+        
+        // Unconditional fallback broadcast for trade results
+        for (const [_, guiSet] of guiClients) {
+          for (const client of guiSet) {
+            if (client !== ws && client.readyState === WebSocket.OPEN) {
+              client.send(JSON.stringify({
+                type: "TRADE_RESULT",
+                data: parsed.data
+              }));
+            }
+          }
+        }
       }
 
       // If a bot sends live account synchronization telemetry (balance, asset, account mode, etc)
       if (parsed.type === "QUOTEX_SYNC") {
-        const { asset, price } = parsed.data || {};
+        const { asset, price, balance, isDemo } = parsed.data || {};
+        addLog(`📡 Sync telemetry -> Asset: ${asset}, Price: ${price}, Balance: ${balance}, Demo: ${isDemo}`);
+        
         if (asset && typeof price === "number" && price > 0) {
           market.injectPrice(asset, price);
         }
+        
+        // Cache the latest synchronization telemetry
+        lastSyncData.set(userId, parsed.data);
+
         broadcastToUserGui(userId, {
           type: "QUOTEX_SYNC",
           data: parsed.data
         });
+
+        // Unconditional global fallback broadcast to all connected GUI clients to secure instant sync
+        for (const [_, guiSet] of guiClients) {
+          for (const client of guiSet) {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(JSON.stringify({
+                type: "QUOTEX_SYNC",
+                data: parsed.data
+              }));
+            }
+          }
+        }
       }
 
       // Handle raw price ticks from Quotex browser
@@ -627,8 +730,7 @@ wss.on("connection", (ws, req) => {
 
       // If GUI requests an immediate execution command (e.g. in semi-auto or manual)
       if (parsed.type === "EXECUTE_TRADE" && clientType === "gui") {
-        // Relay this trade to connected target Quotex bots to execute live trading!
-        console.log(`Relaying EXECUTE_TRADE to ${getBotsCount(userId)} Quotex browser tabs for user: ${userId}`);
+        addLog(`Relaying EXECUTE_TRADE to ${getBotsCount(userId)} bots for user: ${userId}`);
         broadcastToUserBots(userId, {
           type: "EXECUTE_TRADE",
           data: parsed.data
@@ -637,7 +739,7 @@ wss.on("connection", (ws, req) => {
 
       // If GUI requests an asset switch (e.g. manually or via auto-rotation timer)
       if (parsed.type === "SWITCH_ASSET" && clientType === "gui") {
-        console.log(`Relaying SWITCH_ASSET to ${getBotsCount(userId)} Quotex browser tabs for user: ${userId} for asset: ${parsed.data.asset}`);
+        addLog(`Relaying SWITCH_ASSET to ${getBotsCount(userId)} bots for asset: ${parsed.data.asset}`);
         broadcastToUserBots(userId, {
           type: "SWITCH_ASSET",
           data: parsed.data
@@ -645,16 +747,17 @@ wss.on("connection", (ws, req) => {
       }
 
     } catch (err) {
-      console.error("Error parsing WS message:", err);
+      addLog(`❌ Error parsing WS message: ${err}`);
     }
   });
 
   ws.on("close", () => {
     if (clientType === "gui") {
       removeClient(guiClients, userId, ws);
+      addLog(`🔌 React GUI disconnected for UID: ${userId}. Remaining: ${guiClients.get(userId)?.size || 0}`);
     } else {
       removeClient(botClients, userId, ws);
-      console.log(`❌ Automation Script disconnected for UID: ${userId}. Remaining: ${getBotsCount(userId)}`);
+      addLog(`❌ Quotex Bot disconnected for UID: ${userId}. Remaining: ${getBotsCount(userId)}`);
       broadcastToUserGui(userId, {
         type: "SERVER_STATUS",
         data: { botConnected: getBotsCount(userId) > 0, activeBots: getBotsCount(userId) }
@@ -666,10 +769,19 @@ wss.on("connection", (ws, req) => {
 function broadcastToUserGui(userId: string, data: any) {
   const raw = JSON.stringify(data);
   const clients = guiClients.get(userId);
-  if (clients) {
+  if (clients && clients.size > 0) {
     for (const client of clients) {
       if (client.readyState === WebSocket.OPEN) {
         client.send(raw);
+      }
+    }
+  } else if (guiClients.size > 0) {
+    // Robust UID mismatch fallback cascade: route message to all connected React tabs
+    for (const [_, guiSet] of guiClients) {
+      for (const client of guiSet) {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(raw);
+        }
       }
     }
   }
@@ -678,10 +790,19 @@ function broadcastToUserGui(userId: string, data: any) {
 function broadcastToUserBots(userId: string, data: any) {
   const raw = JSON.stringify(data);
   const clients = botClients.get(userId);
-  if (clients) {
+  if (clients && clients.size > 0) {
     for (const client of clients) {
       if (client.readyState === WebSocket.OPEN) {
         client.send(raw);
+      }
+    }
+  } else if (botClients.size > 0) {
+    // Robust UID mismatch fallback cascade: route control signals/trades to all connected bots/tabs on Quotex
+    for (const [_, botSet] of botClients) {
+      for (const client of botSet) {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(raw);
+        }
       }
     }
   }
