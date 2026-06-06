@@ -149,7 +149,7 @@ export const AISniper: React.FC<AISniperProps> = ({
   };
 
   const currentVerdict = analysis ? analysis.verdict : 'NEUTRAL';
-  const design = verdictMap[currentVerdict];
+  const design = verdictMap[currentVerdict as keyof typeof verdictMap] || verdictMap.NEUTRAL;
 
   return (
     <div className="flex flex-col gap-6">

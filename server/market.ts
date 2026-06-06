@@ -20,6 +20,7 @@ export class MarketSimulator {
   private activeIntervals: Record<string, NodeJS.Timeout> = {};
   private tickCallback?: (symbol: string, currentPrice: number, candles: Candlestick[]) => void;
   private lastInjectedTime: Record<string, number> = {};
+  private liveAssets: Set<string> = new Set();
 
   constructor() {
     this.configs = {
@@ -191,6 +192,7 @@ export class MarketSimulator {
   // Inject real price ticks directly from the Quotex active tab browser extension
   public injectPrice(symbol: string, price: number) {
     this.lastInjectedTime[symbol] = Date.now();
+    this.liveAssets.add(symbol);
     this.ensureAsset(symbol, price);
     
     if (this.configs[symbol]) {
@@ -236,6 +238,28 @@ export class MarketSimulator {
     return this.candles[symbol] || [];
   }
 
+  // Check if asset is receiving live data
+  public isLiveAsset(symbol: string): boolean {
+    return this.liveAssets.has(symbol);
+  }
+
+  // Get list of currently live synced assets
+  public getLiveAssets(): string[] {
+    return Array.from(this.liveAssets);
+  }
+
+  // Get synchronization status summary
+  public getSyncStatus() {
+    const allSymbols = Object.keys(this.configs);
+    const live = this.getLiveAssets();
+    const simulated = allSymbols.filter(s => !this.liveAssets.has(s));
+    return {
+      liveAssets: live,
+      simulatedAssets: simulated,
+      totalAssets: allSymbols.length
+    };
+  }
+
   // Generate a tick update (run every 1 second)
   // Calls onTick with updated candles and the active socket broadcast frame
   public startTickLoop(onTick: (symbol: string, currentPrice: number, candles: Candlestick[]) => void) {
@@ -243,9 +267,18 @@ export class MarketSimulator {
     const tickInterval = setInterval(() => {
       const now = Math.floor(Date.now() / 1000);
 
+      // Clear stale live assets (older than 60s)
+      const staleTimeout = 60000;
+      for (const symbol of this.liveAssets) {
+        const lastTime = this.lastInjectedTime[symbol];
+        if (lastTime && (Date.now() - lastTime) > staleTimeout) {
+          this.liveAssets.delete(symbol);
+        }
+      }
+
       for (const symbol of Object.keys(this.configs)) {
-        // Skip simulation if the asset received live price sync in the last 5 seconds to prevent visual flickering
-        if (this.lastInjectedTime[symbol] && (Date.now() - this.lastInjectedTime[symbol]) < 5000) {
+        // Skip simulation completely if it is currently a live asset
+        if (this.liveAssets.has(symbol)) {
           continue;
         }
 

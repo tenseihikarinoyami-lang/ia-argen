@@ -58,6 +58,93 @@ app.get("/api/market/history/:symbol", (req, res) => {
   res.json(market.getHistory(symbol));
 });
 
+// API: Get current Quotex sync status
+app.get("/api/quotex/status", (req, res) => {
+  let totalBots = 0;
+  for (const [_, set] of botClients) {
+    totalBots += set.size;
+  }
+  const syncStatus = market.getSyncStatus();
+  res.json({
+    botConnected: totalBots > 0,
+    activeBots: totalBots,
+    ...syncStatus
+  });
+});
+
+// API: Get last synchronization details for specific user
+app.get("/api/quotex/sync/:userId", (req, res) => {
+  const userId = req.params.userId;
+  const syncData = lastSyncData.get(userId) || (lastSyncData.size > 0 ? Array.from(lastSyncData.values())[0] : null);
+  res.json(syncData);
+});
+
+// API: HTTP Polling Fallback to bypass browser WebSocket CSP constraints completely
+app.post("/api/quotex/poll", (req, res) => {
+  const { userId, type, data } = req.body || {};
+  if (!userId) {
+    return res.status(400).json({ error: "Missing userId" });
+  }
+
+  // Update HTTP bot activity state
+  liveHTTPBots.set(userId, Date.now());
+
+  // Broadcast bot connected status to user's GUIs only
+  broadcastToUserGui(userId, {
+    type: "SERVER_STATUS",
+    data: { botConnected: true, activeBots: getBotsCount(userId) }
+  });
+
+  if (type === "QUOTEX_SYNC" && data) {
+    const { asset, price, balance, isDemo } = data;
+    
+    if (asset && typeof price === "number" && price > 0) {
+      market.injectPrice(asset, price);
+    }
+
+    const syncPayload = {
+      ...data,
+      candles: asset ? market.getHistory(asset).slice(-60) : undefined,
+    };
+
+    lastSyncData.set(userId, syncPayload);
+
+    // Synchronously update browser GUIs
+    broadcastToUserGui(userId, {
+      type: "QUOTEX_SYNC",
+      data: syncPayload
+    });
+  }
+
+  if (type === "QUOTEX_TICK" && data) {
+    const { asset, price } = data;
+    if (asset && typeof price === "number" && price > 0) {
+      market.injectPrice(asset, price);
+      
+      broadcastToUserGui(userId, {
+        type: "QUOTEX_TICK",
+        data: { asset, price, timestamp: Date.now() }
+      });
+    }
+  }
+
+  if (type === "TRADE_RESULT" && data) {
+    broadcastToUserGui(userId, {
+      type: "TRADE_RESULT",
+      data: data
+    });
+  }
+
+  // Retrieve and dispatch any pending command for this bot
+  const commands = pendingCommands.get(userId) || [];
+  pendingCommands.set(userId, []); // Clear queue on retrieval
+
+  res.json({
+    status: "ok",
+    commands: commands
+  });
+});
+
 // Helper functions to call multi-model AI engines using native fetch or SDK
 async function callOpenAICompatibleAPI(
   url: string,
@@ -556,6 +643,10 @@ const guiClients = new Map<string, Set<WebSocket>>();
 const botClients = new Map<string, Set<WebSocket>>();
 const lastSyncData = new Map<string, any>();
 
+// HTTP Fallback Polling stores
+const pendingCommands = new Map<string, any[]>();
+const liveHTTPBots = new Map<string, number>(); // key: userId, value: lastActiveTimestamp
+
 const addClient = (map: Map<string, Set<WebSocket>>, userId: string, ws: WebSocket) => {
   if (!map.has(userId)) {
     map.set(userId, new Set());
@@ -575,12 +666,29 @@ const removeClient = (map: Map<string, Set<WebSocket>>, userId: string, ws: WebS
 
 const getBotsCount = (userId: string): number => {
   const exactCount = botClients.get(userId)?.size || 0;
-  if (exactCount > 0) return exactCount;
+  
+  // Count HTTP fallback clients active in the last 15 seconds
+  let activeHttpBots = 0;
+  const now = Date.now();
+  for (const [uid, timestamp] of liveHTTPBots.entries()) {
+    if (uid === userId && (now - timestamp) < 15000) {
+      activeHttpBots++;
+    }
+  }
+
+  if (exactCount + activeHttpBots > 0) {
+    return exactCount + activeHttpBots;
+  }
 
   // Fallback: Return total number of active bot connections across all userIds (useful for sandbox UID mismatches)
   let totalBots = 0;
   for (const [_, set] of botClients) {
     totalBots += set.size;
+  }
+  for (const [_, timestamp] of liveHTTPBots.entries()) {
+    if ((now - timestamp) < 15000) {
+      totalBots++;
+    }
   }
   return totalBots;
 };
@@ -699,12 +807,17 @@ wss.on("connection", (ws, req) => {
           market.injectPrice(asset, price);
         }
         
+        const syncPayload = {
+          ...parsed.data,
+          candles: asset ? market.getHistory(asset).slice(-60) : undefined,
+        };
+
         // Cache the latest synchronization telemetry
-        lastSyncData.set(userId, parsed.data);
+        lastSyncData.set(userId, syncPayload);
 
         broadcastToUserGui(userId, {
           type: "QUOTEX_SYNC",
-          data: parsed.data
+          data: syncPayload
         });
 
         // Unconditional global fallback broadcast to all connected GUI clients to secure instant sync
@@ -713,7 +826,7 @@ wss.on("connection", (ws, req) => {
             if (client.readyState === WebSocket.OPEN) {
               client.send(JSON.stringify({
                 type: "QUOTEX_SYNC",
-                data: parsed.data
+                data: syncPayload
               }));
             }
           }
@@ -725,6 +838,12 @@ wss.on("connection", (ws, req) => {
         const { asset, price } = parsed.data || {};
         if (asset && typeof price === "number" && price > 0) {
           market.injectPrice(asset, price);
+          
+          // Notify the GUI directly of the tick
+          broadcastToUserGui(userId, {
+            type: "QUOTEX_TICK",
+            data: { asset, price, timestamp: Date.now() }
+          });
         }
       }
 
@@ -735,12 +854,30 @@ wss.on("connection", (ws, req) => {
           type: "EXECUTE_TRADE",
           data: parsed.data
         });
+        
+        // Push to HTTP fallback command queue
+        if (!pendingCommands.has(userId)) {
+          pendingCommands.set(userId, []);
+        }
+        pendingCommands.get(userId)!.push({
+          type: "EXECUTE_TRADE",
+          data: parsed.data
+        });
       }
 
       // If GUI requests an asset switch (e.g. manually or via auto-rotation timer)
       if (parsed.type === "SWITCH_ASSET" && clientType === "gui") {
         addLog(`Relaying SWITCH_ASSET to ${getBotsCount(userId)} bots for asset: ${parsed.data.asset}`);
         broadcastToUserBots(userId, {
+          type: "SWITCH_ASSET",
+          data: parsed.data
+        });
+
+        // Push to HTTP fallback command queue
+        if (!pendingCommands.has(userId)) {
+          pendingCommands.set(userId, []);
+        }
+        pendingCommands.get(userId)!.push({
           type: "SWITCH_ASSET",
           data: parsed.data
         });
@@ -824,6 +961,7 @@ market.startTickLoop((symbol, currentPrice, candles) => {
       symbol,
       price: currentPrice,
       candles: candles.slice(-60), // send last hour
+      isLive: market.isLiveAsset(symbol),
       time: Math.floor(Date.now() / 1000)
     }
   };

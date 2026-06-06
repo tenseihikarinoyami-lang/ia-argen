@@ -119,7 +119,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 // @match        *://*qx-*/*
 // @match        *://*quotx*/*
 // @run-at       document-start
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      *
 // ==/UserScript==
 
 (function() {
@@ -129,18 +131,52 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     const isQuotex = host.includes("quotex") || host.includes("qxbroker") || host.includes("qx-") || host.includes("qx") || host.includes("quotx") || host.includes("broker");
     if (!isQuotex) return;
 
-    console.log("🦾 [Argentum Estricto] Inicializado con éxito. Protecciones Anti-Detección ACTIVAS.");
+    const tabId = Math.random().toString(36).substring(4);
+    
+    // Actively track active tab state
+    const updateActiveTabInStorage = () => {
+        if (document.visibilityState === 'visible') {
+            try {
+                localStorage.setItem("argentum_active_tab_id", tabId);
+                localStorage.setItem("argentum_active_tab_time", Date.now().toString());
+            } catch (e) {}
+        }
+    };
+    try {
+        document.addEventListener('visibilitychange', updateActiveTabInStorage);
+        window.addEventListener('focus', updateActiveTabInStorage);
+        updateActiveTabInStorage();
+    } catch (e) {}
+
+    console.log("🦾 [Argentum Estricto] Inicializado con éxito. Tab ID: " + tabId + " | Protecciones Anti-Detección ACTIVAS.");
 
     // ---- INICIO INTERCEPTADOR DE WEBSOCKETS NATIVOS DE QUOTEX ----
     let liveInterceptedPrice = null;
     let liveInterceptedAsset = null;
     let liveInterceptedBalance = null;
     let liveInterceptedIsDemo = null;
+    let lastKnownAsset = localStorage.getItem("argentum_last_known_asset") || "EUR/USD (OTC)";
+    const liveTicksCache = {};
+
+    const SYMBOL_MAP = {
+        "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY",
+        "USDCAD": "USD/CAD", "USDCHF": "USD/CHF", "AUDUSD": "AUD/USD",
+        "EURGBP": "EUR/GBP", "EURJPY": "EUR/JPY", "GBPJPY": "GBP/JPY",
+        "AUDCAD": "AUD/CAD", "GBPCHF": "GBP/CHF", "NZDUSD": "NZD/USD",
+        "USDBRL": "USD/BRL", "USDMXN": "USD/MXN", "BTCUSD": "BTC/USD",
+        "ETHUSD": "ETH/USD",
+    };
 
     function normalizeSymbol(sym) {
         if (!sym) return "";
         let upper = sym.toUpperCase();
         let isOtc = upper.includes("OTC") || upper.includes("_OTC") || upper.includes("-OTC");
+        
+        // Remove OTC and special characters to lookup in SYMBOL_MAP
+        let cleanKey = upper.replace("OTC", "").replace(/[^A-Z]/g, "").trim();
+        if (SYMBOL_MAP[cleanKey]) {
+            return SYMBOL_MAP[cleanKey] + (isOtc ? " (OTC)" : "");
+        }
         
         // Extraer y procesar pares estandar FX de 6 letras sin interferencia de OTC
         let cleanFX = upper.replace("OTC", "").replace(/[^A-Z]/g, "");
@@ -152,8 +188,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         let base = upper.trim()
                        .replace(/_OTC/g, "")
                        .replace(/-OTC/g, "")
-                       .replace(/\s*OTC/g, "")
-                       .replace(/\(OTC\)/g, "")
+                       .replace(/\\s*OTC/g, "")
+                       .replace(/\\(OTC\\)/g, "")
                        .trim();
                        
         if (base.length === 6 && !base.includes("/")) {
@@ -265,21 +301,21 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
     function onRealLiveTickDetected(symbol, price) {
         const normalized = normalizeSymbol(symbol);
-        liveInterceptedPrice = price;
+        if (normalized) {
+            liveTicksCache[normalized] = price;
+        }
+        if (normalized === lastKnownAsset) {
+            liveInterceptedPrice = price;
+        }
         liveInterceptedAsset = normalized;
         
         if (normalized && normalized.trim().length > 4) {
             // Reenviar tick de alta precision inmediatamente a Argentum AI
-            if (socket && socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify({
-                    type: "QUOTEX_TICK",
-                    data: {
-                        asset: normalized,
-                        price: price,
-                        timestamp: Date.now()
-                    }
-                }));
-            }
+            pushData("QUOTEX_TICK", {
+                asset: normalized,
+                price: price,
+                timestamp: Date.now()
+            });
         }
     }
 
@@ -290,17 +326,24 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
     // Hook del constructor de WebSockets nativo
     try {
-        const OriginalWebSocket = window.WebSocket;
-        window.WebSocket = function(url, protocols) {
+        const targetWindow = (typeof unsafeWindow !== 'undefined' && unsafeWindow !== null) ? unsafeWindow : window;
+        const OriginalWebSocket = targetWindow.WebSocket || window.WebSocket;
+        
+        targetWindow.WebSocket = function(url, protocols) {
             if (url.includes("clientType=bot") || url.includes("quotex-ai-trading-bot-analyst")) {
                 return new OriginalWebSocket(url, protocols);
             }
             console.log("🔌 [Argentum Estricto] Interceptado WebSocket nativo de Quotex:", url);
             const ws = new OriginalWebSocket(url, protocols);
             
-            ws.addEventListener('message', (event) => {
+            ws.addEventListener('message', async (event) => {
                 try {
-                    const data = event.data;
+                    let data = event.data;
+                    if (data instanceof Blob) {
+                        data = await data.text();
+                    } else if (data instanceof ArrayBuffer) {
+                        data = new TextDecoder("utf-8").decode(data);
+                    }
                     if (typeof data === "string") {
                         handleQuotexNativeWSMessage(data);
                     }
@@ -310,15 +353,85 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             });
             return ws;
         };
-        window.WebSocket.prototype = OriginalWebSocket.prototype;
+        targetWindow.WebSocket.prototype = OriginalWebSocket.prototype;
+        
+        // Also apply it to local window just in case
+        if (targetWindow !== window) {
+            window.WebSocket = targetWindow.WebSocket;
+        }
     } catch(wsHookError) {
         console.error("❌ [Argentum] Fallo configurando Hook de WebSocket principal:", wsHookError);
     }
     // ---- FIN INTERCEPTADOR DE WEBSOCKETS NATIVOS DE QUOTEX ----
 
+    const USER_ID = "${userId || 'default_user'}";
+    const BASE_HOST = "${domainOverride}";
+    const PROTOCOL = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'https:' : 'http:';
+    const HTTP_URL = PROTOCOL + "//" + BASE_HOST + "/api/quotex/poll";
     const WS_URL = "${wsUrl}";
+
     let socket = null;
-    let reconnectInterval = 5000;
+    let isWebsocketConnected = false;
+    let reconnectDelay = 1000;
+
+    function pushData(type, payloadData) {
+        const payload = {
+            userId: USER_ID,
+            type: type,
+            data: payloadData,
+            timestamp: Date.now()
+        };
+
+        if (isWebsocketConnected && socket && socket.readyState === WebSocket.OPEN) {
+            try {
+                socket.send(JSON.stringify(payload));
+                return;
+            } catch (wsErr) {
+                console.warn("⚠️ WebSocket send failed, falling back to HTTP:", wsErr);
+            }
+        }
+
+        if (typeof GM_xmlhttpRequest !== "undefined") {
+            try {
+                GM_xmlhttpRequest({
+                    method: "POST",
+                    url: HTTP_URL,
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    data: JSON.stringify(payload),
+                    onload: function(response) {
+                        try {
+                            const res = JSON.parse(response.responseText);
+                            showStatusBanner("✅ ENLACE HTTP ACTIVO (CSP BYPASS)", "#10b981");
+                            
+                            if (res.commands && res.commands.length > 0) {
+                                for (const cmd of res.commands) {
+                                    console.log("📨 [HTTP Polling] Comando recibido:", cmd);
+                                    if (cmd.type === 'EXECUTE_TRADE') {
+                                        executeStrictTradeOnQuotex(cmd.data);
+                                    } else if (cmd.type === 'SWITCH_ASSET') {
+                                        switchStrictAssetOnQuotex(cmd.data.asset);
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            console.error("❌ Error parsing polling response:", e);
+                        }
+                    },
+                    onerror: function(err) {
+                        console.error("❌ HTTP Polling connection error:", err);
+                        showStatusBanner("❌ DESCONECTADO (CSP Bloqueado & HTTP de Red Falló)", "#ef4444");
+                    }
+                });
+            } catch (httpErr) {
+                console.error("❌ GM_xmlhttpRequest invocation error:", httpErr);
+            }
+        } else {
+            console.warn("⚠️ GM_xmlhttpRequest is not granted or supported. Please check Tampermonkey permissions.");
+            showStatusBanner("❌ DESCONECTADO (Muro de Seguridad CSP de Quotex - Habilitar GM_xmlhttpRequest)", "#ef4444");
+        }
+    }
 
     function connect() {
         console.log("🔌 [Argentum Estricto] Conectando a target: " + WS_URL);
@@ -326,7 +439,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
         socket.onopen = () => {
             console.log("✅ [Argentum Estricto] Enlace establecido con el panel Argentum AI.");
+            isWebsocketConnected = true;
             showStatusBanner("✅ IA ENLACE ESTRICTO (ANTI-DETEC)", "#10b981");
+            reconnectDelay = 1000; // Reset reconnection delay on success
             startQuotexScreenSync();
         };
 
@@ -348,9 +463,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         };
 
         socket.onclose = () => {
-            console.warn("❌ [Argentum Estricto] Conexión perdida. Reintentando...");
+            isWebsocketConnected = false;
+            console.warn("❌ [Argentum Estricto] Conexión perdida. Reintentando en " + reconnectDelay + "ms...");
             showStatusBanner("❌ DESCONECTADO (Muro de Seguridad CSP de Quotex o Host incorrecto). Host: " + WS_URL.split("?")[0], "#ef4444");
-            setTimeout(connect, reconnectInterval);
+            
+            // If the socket disconnected on Quotex, we immediately trigger a polls sync so we don't drop offline
+            pushData("PING", {});
+
+            setTimeout(connect, reconnectDelay);
+            // Exponential backoff
+            reconnectDelay = Math.min(reconnectDelay * 2, 30000);
         };
 
         socket.onerror = (err) => {
@@ -360,52 +482,65 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
     // Banner flotante para el dashboard de Quotex
     function showStatusBanner(text, color) {
-        let banner = document.getElementById("argentum-strict-banner");
-        if (!banner) {
-            banner = document.createElement("div");
-            banner.id = "argentum-strict-banner";
-            banner.style.position = "fixed";
-            banner.style.bottom = "20px";
-            banner.style.left = "20px";
-            banner.style.zIndex = "999999";
-            banner.style.padding = "12px 18px";
-            banner.style.borderRadius = "10px";
-            banner.style.color = "#ffffff";
-            banner.style.fontFamily = "sans-serif";
-            banner.style.fontSize = "11px";
-            banner.style.fontWeight = "bold";
-            banner.style.letterSpacing = "0.5px";
-            banner.style.boxShadow = "0 10px 25px rgba(0,0,0,0.5)";
-            banner.style.border = "1px solid rgba(255,255,255,0.1)";
-            banner.style.display = "flex";
-            banner.style.alignItems = "center";
-            banner.style.gap = "8px";
+        try {
+            let banner = document.getElementById("argentum-strict-banner");
+            if (!banner) {
+                const targetContainer = document.body || document.documentElement;
+                if (!targetContainer) {
+                    setTimeout(() => showStatusBanner(text, color), 100);
+                    return;
+                }
+
+                banner = document.createElement("div");
+                banner.id = "argentum-strict-banner";
+                banner.style.position = "fixed";
+                banner.style.bottom = "20px";
+                banner.style.left = "20px";
+                banner.style.zIndex = "999999";
+                banner.style.padding = "12px 18px";
+                banner.style.borderRadius = "10px";
+                banner.style.color = "#ffffff";
+                banner.style.fontFamily = "sans-serif";
+                banner.style.fontSize = "11px";
+                banner.style.fontWeight = "bold";
+                banner.style.letterSpacing = "0.5px";
+                banner.style.boxShadow = "0 10px 25px rgba(0,0,0,0.5)";
+                banner.style.border = "1px solid rgba(255,255,255,0.1)";
+                banner.style.display = "flex";
+                banner.style.alignItems = "center";
+                banner.style.gap = "8px";
+                
+                // Pulsing status dot
+                const dot = document.createElement("span");
+                dot.style.width = "8px";
+                dot.style.height = "8px";
+                dot.style.borderRadius = "50%";
+                dot.style.backgroundColor = "#ffc107";
+                dot.style.animation = "pulse 1.5s infinite";
+                banner.appendChild(dot);
+                
+                const txt = document.createElement("span");
+                txt.id = "banner-text-content";
+                banner.appendChild(txt);
+                
+                // Add pulse style tag safely
+                const style = document.createElement("style");
+                style.textContent = "@keyframes pulse { 0% { opacity: 0.4; } 50% { opacity: 1; } 100% { opacity: 0.4; } }";
+                const headContainer = document.head || document.documentElement;
+                if (headContainer) {
+                    headContainer.appendChild(style);
+                }
+                
+                targetContainer.appendChild(banner);
+            }
             
-            // Pulsing status dot
-            const dot = document.createElement("span");
-            dot.style.width = "8px";
-            dot.style.height = "8px";
-            dot.style.borderRadius = "50%";
-            dot.style.backgroundColor = "#ffc107";
-            dot.style.animation = "pulse 1.5s infinite";
-            banner.appendChild(dot);
-            
-            const txt = document.createElement("span");
-            txt.id = "banner-text-content";
-            banner.appendChild(txt);
-            
-            // Add pulse style tag
-            const style = document.createElement("style");
-            style.textContent = "@keyframes pulse { 0% { opacity: 0.4; } 50% { opacity: 1; } 100% { opacity: 0.4; } }";
-            document.head.appendChild(style);
-            
-            document.body.appendChild(banner);
+            const txt = document.getElementById("banner-text-content");
+            if (txt) txt.textContent = text;
+            banner.style.backgroundColor = "rgba(10, 10, 10, 0.95)";
+            banner.style.borderColor = color;
+        } catch (e) {
+            console.warn("⚠️ Error showing status banner:", e);
         }
-        
-        const txt = document.getElementById("banner-text-content");
-        if (txt) txt.textContent = text;
-        banner.style.backgroundColor = "rgba(10, 10, 10, 0.95)";
-        banner.style.borderColor = color;
     }
 
     // Simula retrasos humanos realistas y eventos coordinados de ratón (X, Y aleatorios dentro del botón)
@@ -415,7 +550,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         try {
             const balEl = document.querySelector('.header__balance, .account-balance, .balance-value, .user-balance, [class*="balance"]');
             if (balEl) {
-                balanceBefore = parseFloat(balEl.textContent.replace(/[^\\d.]/g, '')) || 10000.00;
+                balanceBefore = parseFloat(balEl.textContent.replace(/[^0-9.]/g, '')) || 10000.00;
             }
         } catch(e) {}
 
@@ -621,10 +756,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                         }
                     };
 
-                    if (socket && socket.readyState === WebSocket.OPEN) {
-                        socket.send(JSON.stringify(resultMessage));
-                        console.log("🚀 [Enlace Argentum] Resultados enviados a la Central Argentum con éxito.");
-                    }
+                    pushData("TRADE_RESULT", resultMessage.data);
+                    console.log("🚀 [Enlace Argentum] Resultados enviados a la Central Argentum con éxito.");
                 }
 
                 // Iniciar análisis de balance con micro-delay de resolución del ticker del servidor
@@ -755,9 +888,19 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                             }
                         }
                     }, 450);
+                }, 150);
+            }
+        } catch (err) {
+            console.warn("⚠️ Error in switchStrictAssetOnQuotex:", err);
+        }
+    }
 
                     // 5. Telemetry screen synchronizer (Sends live actual balance and current active asset)
+    let isSyncStarted = false;
     function startQuotexScreenSync() {
+        if (isSyncStarted) return;
+        isSyncStarted = true;
+
         const blacklistedWords = [
             "TRADE", "TRADING", "MARKET", "ACCOUNT", "DEMO", "SUPPORT", "TOURNAMENT", "TOURNAMENTS", 
             "TOURNA", "OURNA", "MENT", "MORE", "LOGIN", "INDEX", "STATUS", "PROFILE", "DRAWER", "SETTINGS", 
@@ -767,15 +910,31 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
         const isValidSymbol = (sym) => {
             if (!sym) return false;
-            const clean = sym.toUpperCase().trim().replace(/[\s()]/g, "");
-            for (const w of blacklistedWords) {
-                if (clean === w || clean.includes(w)) return false;
+            const upper = sym.toUpperCase().trim().split("(")[0].trim().replace("/", "");
+            const knownAssets = [
+              'EURUSD', 'GBPUSD', 'EURGBP', 'USDCAD', 'USDBRL', 'AUDUSD', 'USDJPY', 'EURJPY', 'GBPJPY', 'NZDUSD', 'AUDCAD', 'GBPCHF', 'GOLD', 'BTCUSD', 'ETHUSD', 'NZDJPY', 'USDARS', 'USDMXN'
+            ];
+            if (knownAssets.includes(upper)) return true;
+            
+            // Check if standard 6-character FX pair with valid currencies
+            if (upper.length === 6) {
+                const base = upper.substring(0, 3);
+                const quote = upper.substring(3, 6);
+                const validCurrencies = [
+                    "EUR", "USD", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD", "BRL", "MXN", "BTC", "ETH", "LTC", "XRP", 
+                    "TRY", "INR", "IDR", "ARS", "MYR", "VND", "PHP", "THB", "KZT", "COP", "CLP", "PEN", "CNY", "RUB", "SGD", "ZAR"
+                ];
+                return validCurrencies.includes(base) && validCurrencies.includes(quote);
             }
-            return true;
+            return false;
         };
 
         // Persistent cache to preserve previous validated asset state during transient loading phases
-        let lastKnownAsset = "EUR/USD (OTC)";
+        lastKnownAsset = localStorage.getItem("argentum_last_known_asset") || "EUR/USD (OTC)";
+        if (!isValidSymbol(lastKnownAsset.split("(")[0])) {
+            lastKnownAsset = "EUR/USD (OTC)";
+            localStorage.setItem("argentum_last_known_asset", "EUR/USD (OTC)");
+        }
 
         const getLivePrice = () => {
             const specificSelectors = [
@@ -836,87 +995,310 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             return null;
         };
 
-        setInterval(() => {
-            if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        const extractCleanAsset = (rawText) => {
+            if (!rawText) return null;
+            let clean = rawText.toUpperCase().trim();
+            
+            const forbidden = [
+                "DEMO", "TRADE", "ACCOUNT", "QUOTEX", "STATUS", "LOGIN", "SUPPORT", "TOURNAMENT", "PROFILE", 
+                "SETTINGS", "DEPOSIT", "WITHDRAWAL", "BONUS", "TRANSACTION", "HISTORIAL", "DESCARGA",
+                "SWITCH", "TIME", "INVEST", "AMOUNT", "EXPIRY", "EXPIRATION", "UP", "DOWN", "CALL", 
+                "PUT", "ARRIBA", "ABAJO", "PENDING", "BALANCE", "PAYOUT", "STREAK", "HEADER", "CHART", 
+                "STRICT", "CANCEL", "BUTTON", "SELECT", "ACTIVE", "MARKET", "PROFIT", "SIGNAL"
+            ];
+            
+            // 1. Try to find a known asset first (even if there are other branded or system words in the rawText)
+            const knownAssets = [
+              'EUR/USD', 'GBP/USD', 'EUR/GBP', 'USD/CAD', 'USD/BRL', 'AUD/USD', 'USD/JPY', 'EUR/JPY', 'GBP/JPY', 'NZD/USD', 'AUD/CAD', 'GBP/CHF', 'GOLD', 'BTC/USD', 'ETH/USD', 'NZD/JPY', 'USD/ARS', 'USD/MXN'
+            ];
+            
+            for (const asset of knownAssets) {
+                const unslashed = asset.replace("/", "");
+                const lettersOnlyClean = clean.replace(/[^A-Z]/g, "");
+                if (lettersOnlyClean.includes(unslashed)) {
+                    const isOtc = rawText.toUpperCase().includes("OTC") || rawText.toUpperCase().includes("OFF-EXCHANGE") || rawText.toUpperCase().includes("OVER-THE-COUNTER");
+                    return asset === "GOLD" ? "Gold (OTC)" : (asset + (isOtc ? " (OTC)" : ""));
+                }
+            }
+            
+            // Direct block of exact words or strings containing forbidden UI labels ONLY if no known asset is matching
+            for (const word of forbidden) {
+                if (clean === word || clean.includes(" " + word) || clean.includes(word + " ")) {
+                    return null;
+                }
+            }
+            
+            // Clean up system/noise words first so they don't produce false positive 6-letter pairs like QUO/TEX
+            for (const word of forbidden) {
+                const regex = new RegExp(word, 'g');
+                clean = clean.replace(regex, '');
+            }
+            
+            // Extract all uppercase alphabetical letters
+            const lettersOnly = clean.replace(/[^A-Z]/g, "");
+            
+            // 2. Fallback for standard 6-letter FX pairs with non-A-Z boundaries
+            for (let i = 0; i <= lettersOnly.length - 6; i++) {
+                const sub = lettersOnly.substring(i, i + 6);
+                const base = sub.substring(0, 3);
+                const quote = sub.substring(3, 6);
+                const pair = base + "/" + quote;
+                
+                const validCurrencies = [
+                    "EUR", "USD", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD", "BRL", "MXN", "BTC", "ETH", "LTC", "XRP", 
+                    "TRY", "INR", "IDR", "ARS", "MYR", "VND", "PHP", "THB", "KZT", "COP", "CLP", "PEN", "CNY", "RUB", "SGD", "ZAR"
+                ];
+                
+                if (validCurrencies.includes(base) && validCurrencies.includes(quote)) {
+                    const isOtc = rawText.toUpperCase().includes("OTC") || rawText.toUpperCase().includes("OFF-EXCHANGE") || rawText.toUpperCase().includes("OVER-THE-COUNTER");
+                    return pair + (isOtc ? " (OTC)" : "");
+                }
+            }
+            
+            return null;
+        };
 
+        const extractCleanBalance = (text) => {
+            if (!text) return null;
+            const matches = text.match(/[$€£R]?\\s*([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2}))/g);
+            if (matches && matches.length > 0) {
+                let lastMatch = matches[matches.length - 1];
+                let clean = lastMatch.replace(/[^0-9.,]/g, '');
+                
+                if (clean.includes('.') && clean.includes(',')) {
+                    if (clean.indexOf('.') < clean.indexOf(',')) {
+                        clean = clean.replace(/\\./g, '').replace(/,/g, '.');
+                    } else {
+                        clean = clean.replace(/,/g, '');
+                    }
+                } else if (clean.includes(',')) {
+                    const parts = clean.split(',');
+                    if (parts[1].length === 2 || parts[1].length === 1) {
+                        clean = clean.replace(/,/g, '.');
+                    } else {
+                        clean = clean.replace(/,/g, '');
+                    }
+                }
+                const val = parseFloat(clean);
+                if (!isNaN(val) && val >= 0) {
+                    return val;
+                }
+            }
+            const simpleMatches = text.match(/[0-9]+(?:\.[0-9]+)?/g);
+            if (simpleMatches && simpleMatches.length > 0) {
+                const lastSimple = parseFloat(simpleMatches[simpleMatches.length - 1]);
+                if (!isNaN(lastSimple) && lastSimple >= 0) {
+                    return lastSimple;
+                }
+            }
+            return null;
+        };
+
+        setInterval(() => {
             try {
                 let foundAsset = "";
 
-                // High-Precision Algorithmic Active Asset Detection
+                // High-Precision Algorithmic Active Asset Detection (Anti-leak & zero character-escape errors)
                 const getActiveAsset = () => {
-                    // Try 1: Scan active tabs if multiple tabs exist
+                    const isElementValidAndVisible = (el) => {
+                        if (!el) return false;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width === 0 || rect.height === 0) return false;
+                        
+                        // ONLY exclude select dropdown LISTS or SEARCH modals where lists of inactive assets are listed.
+                        if (el.closest('.assets-modal, .select-list, .assets-list, [class*="select-list"], [class*="assets-list"]')) {
+                            return false;
+                        }
+
+                        // Robust computed CSS styles check (filters out elements hidden via opacity, display or visibility)
+                        try {
+                            const style = window.getComputedStyle(el);
+                            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                                return false;
+                            }
+                        } catch (styleErr) {}
+
+                        return true;
+                    };
+
+                    // Try 0: Primary High-Fidelity Selectors for current Quotex layout (active tab, mobile headers, sidebar forms)
                     try {
-                        const activeTab = document.querySelector('.tabs__item_active, .tabs__item.active, [class*="tabs__item"][class*="active"], [class*="tab-active"], .tab-active');
-                        if (activeTab) {
-                            const nameEl = activeTab.querySelector('.tabs__item-name, [class*="name"], span');
-                            const rawText = (nameEl ? nameEl.textContent : activeTab.textContent) || "";
-                            const cleanText = rawText.trim().toUpperCase().replace(/\\s+/g, ' ');
-                            if (cleanText && cleanText.length >= 6 && cleanText.length <= 18) {
-                                return cleanText;
+                        const directSelectors = [
+                            '#tab-active .l5ftG',
+                            '#tab-active [class*="name"]',
+                            '#tab-active span',
+                            '#tab-active',
+                            '#header-mobile-asset-btn .Sgocu',
+                            '#mobile-asset-btn .Sgocu',
+                            '.Z_xPY .xfLZW',
+                            '.Sgocu',
+                            '.xfLZW',
+                            '.l5ftG'
+                        ];
+                        for (const sel of directSelectors) {
+                            const el = document.querySelector(sel);
+                            if (el && isElementValidAndVisible(el)) {
+                                const cleanAsset = extractCleanAsset(el.textContent);
+                                if (cleanAsset) return cleanAsset;
                             }
                         }
-                    } catch (err) {}
+                    } catch (e) {}
 
-                    // Try 2: Scan selective active CSS selectors
-                    const selectiveSelectors = [
-                        '.tabs__item_active', 
-                        '.tabs__item--active',
-                        '.tabs__item.active',
-                        '.tab-active', 
-                        '.tiles-item-active',
-                        '.active-tab',
-                        '.active-asset', 
-                        '.current-asset',
-                        '.tabs__item_active .tabs__item-name',
-                        '.tabs__item.active .tabs__item-name',
-                        '.asset-select__button', 
-                        '.asset-select__title',
-                        '.asset-select'
-                    ];
-                    for (const sel of selectiveSelectors) {
-                        try {
-                            const el = document.querySelector(sel);
-                            if (el && el.textContent) {
-                                let isVisible = el.offsetWidth > 0 || el.offsetHeight > 0;
-                                if (isVisible) {
-                                    const text = el.textContent.trim().toUpperCase().replace(/\\s+/g, ' ');
-                                    if (text && text.length >= 6 && text.length <= 18) {
-                                        return text;
+                    // Try 1: Scan active tabs by matching style classes indicating active states (most specific, high priority)
+                    try {
+                        const activeTabSelectors = [
+                            '.tabs__item_active',
+                            '.tabs__item.active',
+                            '.tabs__item--active',
+                            '[class*="tabs__item"][class*="active"]',
+                            '[class*="tab-item"][class*="active"]',
+                            '.tab.active',
+                            '.tab_active',
+                            '.tab-active'
+                        ];
+                        for (const sel of activeTabSelectors) {
+                            const activeTabs = document.querySelectorAll(sel);
+                            for (const activeTab of activeTabs) {
+                                if (activeTab && isElementValidAndVisible(activeTab)) {
+                                    const nameEl = activeTab.querySelector('.tabs__item-name, [class*="name"], span') || activeTab;
+                                    const cleanAsset = extractCleanAsset(nameEl.textContent);
+                                    if (cleanAsset) return cleanAsset;
+                                }
+                            }
+                        }
+                    } catch (e) {}
+
+                    // Try 2: Scan the top/right control panel's active asset button text / dropdown button
+                    try {
+                        const assetBtnSelectors = [
+                            '.asset-select__name',
+                            '.asset-select__button',
+                            '.asset-select',
+                            '.btn-asset',
+                            '[class*="asset-select__button"]',
+                            '[class*="asset-select__name"]',
+                            '[class*="asset-select"]',
+                            '[class*="btn-asset"]'
+                        ];
+                        for (const sel of assetBtnSelectors) {
+                            const btns = document.querySelectorAll(sel);
+                            for (const btn of btns) {
+                                if (isElementValidAndVisible(btn)) {
+                                    const cleanAsset = extractCleanAsset(btn.textContent);
+                                    if (cleanAsset) return cleanAsset;
+                                }
+                            }
+                        }
+                    } catch (e) {}
+
+                    // Try 3: Document title (updated instantly with active asset and safe with improved extractCleanAsset)
+                    try {
+                        if (typeof document !== 'undefined' && document.title) {
+                            const cleanAsset = extractCleanAsset(document.title);
+                            if (cleanAsset) return cleanAsset;
+                        }
+                    } catch (e) {}
+
+                    // Try 4: Find active tab by locating the visible close "x" button (Only active tab has visible close button)
+                    try {
+                        const tabs = document.querySelectorAll('.tabs__item, [class*="tabs__item"], .tab, [class*="tab-item"]');
+                        for (const tab of tabs) {
+                            if (isElementValidAndVisible(tab)) {
+                                const closeBtn = tab.querySelector('.tabs__item-close, [class*="tabs__item-close"], [class*="tab-close"], .close, [class*="close"]');
+                                if (closeBtn && isElementValidAndVisible(closeBtn)) {
+                                    const nameEl = tab.querySelector('.tabs__item-name, [class*="name"], span') || tab;
+                                    const cleanAsset = extractCleanAsset(nameEl.textContent);
+                                    if (cleanAsset) return cleanAsset;
+                                }
+                            }
+                        }
+                    } catch (e) {}
+
+                    // Try 5: Ultra-resilient TreeWalker Fallback (only runs if previous tries find nothing)
+                    try {
+                        const walker = document.createTreeWalker(
+                            document.body,
+                            NodeFilter.SHOW_TEXT,
+                            {
+                                acceptNode: function(node) {
+                                    const parent = node.parentElement;
+                                    if (!parent) return NodeFilter.FILTER_REJECT;
+                                    const tag = parent.tagName.toUpperCase();
+                                    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return NodeFilter.FILTER_REJECT;
+                                    
+                                    if (parent.closest('.assets-modal, .select-list, .assets-list, [class*="select-list"], [class*="assets-list"]')) {
+                                        return NodeFilter.FILTER_REJECT;
+                                    }
+                                    // REJECT text inside inactive tabs (any tab container class like pPomf or yaDmv that doesn't have id="tab-active")
+                                    const tabContainer = parent.closest('.pPomf, .yaDmv, [class*="pPomf"], [class*="yaDmv"]');
+                                    if (tabContainer && tabContainer.id !== 'tab-active') {
+                                        return NodeFilter.FILTER_REJECT;
+                                    }
+                                    return NodeFilter.FILTER_ACCEPT;
+                                }
+                            }
+                        );
+                        
+                        let currentNode;
+                        while (currentNode = walker.nextNode()) {
+                            const txt = currentNode.textContent ? currentNode.textContent.trim() : "";
+                            // Valid format: length between 6 (e.g. BTCUSD) and 25 (e.g. GBP/USD (OTC))
+                            if (txt.length >= 6 && txt.length <= 25) {
+                                const cleanAsset = extractCleanAsset(txt);
+                                if (cleanAsset) {
+                                    const parent = currentNode.parentElement;
+                                    if (parent && isElementValidAndVisible(parent)) {
+                                        return cleanAsset;
                                     }
                                 }
                             }
-                        } catch (err) {}
-                    }
-
-                    // Try 3: Document title
-                    if (typeof document !== 'undefined' && document.title) {
-                        const titleStr = document.title.toUpperCase();
-                        const match = titleStr.match(/([A-Z]{3}[\\/_-]?[A-Z]{3}(\\s*\\(?OTC\\)?)?)/i);
-                        if (match) {
-                            return match[1].trim().toUpperCase();
                         }
-                    }
+                    } catch (e) {}
 
                     return null;
                 };
+
+                // Multi-tab sync gate: Prevent background instances from spamming state updates
+                try {
+                    if (document.visibilityState === 'visible') {
+                        localStorage.setItem("argentum_active_tab_id", tabId);
+                        localStorage.setItem("argentum_active_tab_time", Date.now().toString());
+                    } else {
+                        const activeTabId = localStorage.getItem("argentum_active_tab_id");
+                        const activeTabTime = parseInt(localStorage.getItem("argentum_active_tab_time") || "0", 10);
+                        const now = Date.now();
+                        
+                        // If there is another active tab that was updated recently (< 5 seconds ago), and it isn't us, then yield.
+                        if (activeTabId && activeTabId !== tabId && (now - activeTabTime) < 5000) {
+                            console.log("⏸️ [Argentum Sync] Yielding synchronization payload: Another active tab has focus (" + activeTabId + ").");
+                            return;
+                        }
+                    }
+                } catch (e) {}
 
                 const detectedAsset = getActiveAsset();
                 if (detectedAsset) {
                     foundAsset = detectedAsset;
                 }
 
-                if (foundAsset && isValidSymbol(foundAsset)) {
+                if (foundAsset && isValidSymbol(foundAsset.split("(")[0])) {
                     lastKnownAsset = foundAsset;
+                    localStorage.setItem("argentum_last_known_asset", foundAsset);
                 }
 
                 const currentAsset = lastKnownAsset;
 
-                // Try to find the live balance text robustly
+                // Extra resilient balance finder
                 let foundBalanceText = "";
+                
+                // Tier 1: Try specific selectors first (including the high-priority .pVBHU and specific live containers)
                 const balanceSelectors = [
+                    '.pVBHU',
+                    '._58LeE .pVBHU',
+                    '[class*="pVBHU"]',
+                    '.header__balance .value',
                     '.header__balance-val', 
                     '.header__balance-value',
-                    '.header__balance .value',
                     '.header__active-balance',
                     '.account-balance', 
                     '.balance-value', 
@@ -924,89 +1306,78 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     '.header__demo',
                     '.header__live',
                     '.header__balance',
-                    '[class*="balance-val"]',
-                    '[class*="balance"]',
                     '.balance'
                 ];
                 
                 for (const sel of balanceSelectors) {
                     try {
-                        const candidates = document.querySelectorAll(sel);
-                        for (const el of candidates) {
-                            if (el && el.textContent) {
-                                // Exclude actual choice selectors or dialog models only
-                                if (el.closest('.modal, .popup, .account-select__dropdown, .select-list, .modal-dialog, .dropdown, .menu')) {
-                                    continue;
-                                }
-                                const txt = el.textContent.trim();
-                                if (txt && /[0-9]/.test(txt)) {
-                                    foundBalanceText = txt;
-                                    break;
-                                }
-                            }
-                        }
-                        if (foundBalanceText) break;
-                    } catch (err) {}
-                }
-                
-                // Fallback scan: Search inside the main header or top bar string
-                if (!foundBalanceText) {
-                    try {
-                        const header = document.querySelector('header, .header, .header__right, .user-panel, [class*="header"]');
-                        if (header && header.textContent) {
-                            const txt = header.textContent;
-                            // Match demo/real plus currency signs followed by digits
-                            const match = txt.match(/(?:DEMO|REAL|LIVE)?\\s*[\\$€£R]?\\s*[0-9]+[0-9,.]*/i);
-                            if (match) {
-                                foundBalanceText = match[0];
-                            }
-                        }
-                    } catch (err) {}
-                }
-
-                // Analyze balance and clean decimal signs
-                let cleanedBalance = 10000.00;
-                if (foundBalanceText) {
-                    let clean = foundBalanceText.replace(/[^0-9.,]/g, '');
-                    if (clean.includes('.') && clean.includes(',')) {
-                        if (clean.indexOf('.') < clean.indexOf(',')) {
-                            clean = clean.replace(/\\./g, '').replace(/,/g, '.');
-                        } else {
-                            clean = clean.replace(/,/g, '');
-                        }
-                    } else if (clean.includes(',')) {
-                        const parts = clean.split(',');
-                        if (parts[1].length === 2 || parts[1].length === 1) {
-                            clean = clean.replace(/,/g, '.');
-                        } else {
-                            clean = clean.replace(/,/g, '');
-                        }
-                    }
-                    const numMatch = clean.match(/[0-9.]+/);
-                    if (numMatch) {
-                        cleanedBalance = parseFloat(numMatch[0]) || 10000.00;
-                    }
-                }
-
-                // Try to identify account mode (Live vs Demo) safely without expensive innerText reflows
-                let isDemo = true;
-                if (window.location.href.includes("demo-trade") || window.location.href.includes("demo")) {
-                    isDemo = true;
-                } else if (window.location.href.includes("real-trade") || window.location.href.includes("trade") || window.location.href.includes("live")) {
-                    isDemo = false;
-                } else {
-                    try {
-                        const header = document.querySelector('header, .header, .header__right, .user-panel, [class*="header"]');
-                        if (header && header.textContent) {
-                            const txt = header.textContent.toUpperCase();
-                            if (txt.includes('REAL') || txt.includes('LIVE')) {
-                                isDemo = false;
+                        const el = document.querySelector(sel);
+                        if (el && el.textContent) {
+                            const txt = el.textContent.trim();
+                            if (txt && /[0-9]/.test(txt)) {
+                                foundBalanceText = txt;
+                                break;
                             }
                         }
                     } catch (e) {}
                 }
+                
+                // Tier 2: Search in header elements for text starting/containing currency signs or matching currency patterns
+                if (!foundBalanceText) {
+                    try {
+                        const headerElements = document.querySelectorAll('header, [class*="header"], [class*="user-panel"], [class*="top-bar"]');
+                        for (const header of headerElements) {
+                            const items = header.querySelectorAll('*');
+                            for (const el of items) {
+                                if (el.children.length === 0 && el.textContent) {
+                                    const txt = el.textContent.trim();
+                                    if (txt && (txt.includes('$') || txt.includes('€') || txt.includes('£')) && /[0-9]+/.test(txt)) {
+                                        foundBalanceText = txt;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (foundBalanceText) break;
+                        }
+                    } catch (e) {}
+                }
+                
+                // Tier 3: Search anywhere in DOM for elements that mention account types and extract digits nearby
+                if (!foundBalanceText) {
+                    try {
+                        const elements = document.querySelectorAll('*');
+                        for (const el of elements) {
+                            if (el.children.length === 0 && el.textContent) {
+                                const txt = el.textContent.toUpperCase();
+                                if ((txt.includes('DEMO ACCOUNT') || txt.includes('REAL ACCOUNT') || txt.includes('LIVE ACCOUNT')) && /[0-9]+/.test(txt)) {
+                                    foundBalanceText = el.textContent;
+                                    break;
+                                }
+                            }
+                        }
+                    } catch(e) {}
+                }
 
-                // Double check demo indicator - if the balance has the word DEMO, or we see demo texts on header
+                // Analyze robustly parsed DOM balance
+                const domBalance = extractCleanBalance(foundBalanceText);
+
+                // Robust account type (Demo vs Live) detection
+                let isDemo = true;
+                try {
+                    const textContent = document.body.textContent ? document.body.textContent.toUpperCase() : "";
+                    const headerEl = document.querySelector('header, .header, [class*="header"]');
+                    const headerText = headerEl ? (headerEl.textContent || "").toUpperCase() : "";
+                    
+                    if (headerText.includes('DEMO ACCOUNT') || headerText.includes('DEMO-ACCOUNT') || headerText.includes('DEMO-TRADE') || window.location.href.includes("demo")) {
+                        isDemo = true;
+                    } else if (headerText.includes('REAL ACCOUNT') || headerText.includes('LIVE ACCOUNT') || headerText.includes('REAL-ACCOUNT') || window.location.href.includes("real")) {
+                        isDemo = false;
+                    } else {
+                        isDemo = window.location.href.includes("demo");
+                    }
+                } catch(e) {}
+
+                // Try to find the demo header element to confirm
                 try {
                     const demoHeaderMatch = document.querySelector('.header__demo, .header__balance-demo, [class*="demo"]');
                     if (demoHeaderMatch && !demoHeaderMatch.closest('.dropdown, .menu, .popup, .modal')) {
@@ -1014,31 +1385,33 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     }
                 } catch (e) {}
 
-                // Prioritize live intercepted WebSocket telemetry to ensure flawless, real-time data sync with NO discrepancy
-                const finalAsset = (liveInterceptedAsset !== null) ? liveInterceptedAsset : lastKnownAsset;
-                const currentPrice = (liveInterceptedPrice !== null) ? liveInterceptedPrice : getLivePrice();
-                const finalBalance = (liveInterceptedBalance !== null) ? liveInterceptedBalance : cleanedBalance;
-                const finalIsDemo = (liveInterceptedIsDemo !== null) ? liveInterceptedIsDemo : isDemo;
+                // We ALWAYS sync the active DOM-detected chart asset ("currentAsset")
+                const finalAsset = currentAsset;
+                const cachedPrice = finalAsset ? liveTicksCache[finalAsset] : null;
+                const currentPrice = (cachedPrice !== null && cachedPrice !== undefined) ? cachedPrice : ((liveInterceptedPrice !== null) ? liveInterceptedPrice : getLivePrice());
+                
+                // We ALWAYS sync the authentic DOM-parsed balance, and fall back to native-intercepted/previous ONLY if DOM is un-rendered (loading)
+                const finalBalance = (domBalance !== null) ? domBalance : ((liveInterceptedBalance !== null) ? liveInterceptedBalance : 10000.00);
+                const finalIsDemo = isDemo;
 
                 console.log("📡 [Argentum Sync] Sincronizando -> Activo: " + finalAsset + " | Precio: " + currentPrice + " | Balance: " + finalBalance + " | Demo: " + finalIsDemo);
 
-                socket.send(JSON.stringify({
-                    type: "QUOTEX_SYNC",
-                    data: {
-                        balance: finalBalance,
-                        asset: finalAsset,
-                        price: currentPrice,
-                        isDemo: finalIsDemo,
-                        timestamp: Date.now()
-                    }
-                }));
+                pushData("QUOTEX_SYNC", {
+                    balance: finalBalance,
+                    asset: finalAsset,
+                    price: currentPrice,
+                    isDemo: finalIsDemo,
+                    isLive: true,
+                    timestamp: Date.now()
+                });
 
             } catch (err) {
                 console.warn("⚠️ Failed to compile Quotex telemetry:", err);
             }
-        }, 1000);
+        }, 1500);
     }
 
+    startQuotexScreenSync();
     connect();
 })();`;
 
@@ -1494,6 +1867,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 </li>
                 <li>
                   <strong className="text-zinc-100">Solución 3:</strong> Abre la <span className="text-zinc-100">Consola de Desarrollador (F12)</span> en la pestaña de Quotex. Verás si el script se está conectando o si hay un error de bloqueo que la extensión de CSP neutralizará enseguida.
+                </li>
+                <li>
+                  <strong className="text-zinc-100">Solución 4 (Sincronización):</strong> Si ves activos extraños como <span className="text-rose-400 font-bold">"SWI/TCH"</span> o notar que el activo no coincide, es porque estás usando una versión guardada en caché antigua del script. <strong>Copia la nueva versión (Fácilmente desde abajo con "Copiar Script"), reemplázala por completo en Tampermonkey, guárdala (Ctrl+S) y recarga la página de Quotex.</strong>
                 </li>
               </ul>
             </div>

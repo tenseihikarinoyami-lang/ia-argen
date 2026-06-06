@@ -35,6 +35,27 @@ import {
   Loader2
 } from 'lucide-react';
 
+const isValidSymbol = (sym: string): boolean => {
+  if (!sym) return false;
+  const upper = sym.toUpperCase().trim().split("(")[0].trim().replace("/", "");
+  const knownAssets = [
+    'EURUSD', 'GBPUSD', 'EURGBP', 'USDCAD', 'USDBRL', 'AUDUSD', 'USDJPY', 'EURJPY', 'GBPJPY', 'NZDUSD', 'AUDCAD', 'GBPCHF', 'GOLD', 'BTCUSD', 'ETHUSD', 'NZDJPY', 'USDARS', 'USDMXN'
+  ];
+  if (knownAssets.includes(upper)) return true;
+  
+  // Check if standard 6-character FX pair with valid currencies
+  if (upper.length === 6) {
+    const base = upper.substring(0, 3);
+    const quote = upper.substring(3, 6);
+    const validCurrencies = [
+      "EUR", "USD", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD", "BRL", "MXN", "BTC", "ETH", "LTC", "XRP", 
+      "TRY", "INR", "IDR", "ARS", "MYR", "VND", "PHP", "THB", "KZT", "COP", "CLP", "PEN", "CNY", "RUB", "SGD", "ZAR"
+    ];
+    return validCurrencies.includes(base) && validCurrencies.includes(quote);
+  }
+  return false;
+};
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -141,12 +162,8 @@ export default function App() {
       if (snapshot.exists()) {
         const data = snapshot.data();
         if (data.settings) {
-          const blacklist = ["TOURNA", "OURNA", "MENT", "TRADE", "ACCOUNT", "DEMO", "SUPPORT", "STATUS"];
           const rawAssets = data.settings.assets || [];
-          const sanitizedAssets = rawAssets.filter((asset: string) => {
-            const upper = asset.toUpperCase();
-            return !blacklist.some(word => upper.includes(word)) && asset.trim().length >= 4;
-          });
+          const sanitizedAssets = rawAssets.filter((asset: string) => isValidSymbol(asset));
           
           const isDirty = sanitizedAssets.length !== rawAssets.length || 
             !sanitizedAssets.includes(data.settings.activeAsset);
@@ -213,11 +230,7 @@ export default function App() {
 
   const handleUpdateSettings = (newSettings: SystemSettings) => {
     // Automatically sanitize and remove any invalid assets that might have leaked into the state
-    const blacklist = ["TOURNA", "OURNA", "MENT", "TRADE", "ACCOUNT", "DEMO", "SUPPORT", "STATUS"];
-    const sanitizedAssets = newSettings.assets.filter(asset => {
-      const upper = asset.toUpperCase();
-      return !blacklist.some(word => upper.includes(word)) && asset.trim().length >= 4;
-    });
+    const sanitizedAssets = newSettings.assets.filter(asset => isValidSymbol(asset));
     
     const sanitizedSettings = {
       ...newSettings,
@@ -332,6 +345,9 @@ export default function App() {
           // Capture telemetry synchronizer data from the Quotex active tab
           if (payload.type === 'QUOTEX_SYNC') {
             setQuotexSyncData(payload.data);
+            if (payload.data.candles && Array.isArray(payload.data.candles) && payload.data.candles.length > 0) {
+              setCandles(payload.data.candles);
+            }
             if (payload.data.balance !== undefined && payload.data.balance > 0) {
               handleUpdateBalance(payload.data.balance);
             }
@@ -341,11 +357,7 @@ export default function App() {
             // Dynamic real-time asset synchronization to eliminate client-side mismatches!
             if (payload.data.asset && payload.data.asset !== currentAssetRef.current) {
               const syncedAsset = payload.data.asset;
-              const blacklist = ["TOURNA", "OURNA", "MENT", "TRADE", "ACCOUNT", "DEMO", "SUPPORT", "STATUS"];
-              const upperAsset = syncedAsset.toUpperCase();
-              const isInvalid = blacklist.some(word => upperAsset.includes(word)) || syncedAsset.trim().length < 4;
-              
-              if (!isInvalid) {
+              if (isValidSymbol(syncedAsset)) {
                 const currentSettings = settingsRef.current;
                 const listContains = currentSettings.assets.includes(syncedAsset);
                 handleUpdateSettings({
@@ -355,6 +367,14 @@ export default function App() {
                 });
                 setToast(`Sincronizado: Quotex abrió ${syncedAsset}`, 'info');
               }
+            }
+          }
+
+          // Handle raw price ticks from Quotex browser
+          if (payload.type === 'QUOTEX_TICK') {
+            const { asset, price } = payload.data || {};
+            if (asset === currentAssetRef.current && typeof price === 'number' && price > 0) {
+              setActivePrice(price);
             }
           }
 
@@ -392,9 +412,30 @@ export default function App() {
     };
   }, [user]);
 
+  // Periodic status monitoring hook
+  useEffect(() => {
+    if (!user) return;
+    const updateStatus = async () => {
+      try {
+        const res = await fetch('/api/quotex/status');
+        if (res.ok) {
+          const status = await res.json();
+          setBotConnected(status.botConnected);
+          setActiveBotsCount(status.activeBots || 0);
+        }
+      } catch (err) {
+        console.debug("Failed checking status:", err);
+      }
+    };
+    updateStatus(); // run once immediately
+    const interval = setInterval(updateStatus, 10000);
+    return () => clearInterval(interval);
+  }, [user]);
+
   // Dispatch live Technical AI Analysis request to chosen AI engine
   const triggerAIAnalysis = async () => {
-    if (isAnalyzing || candles.length === 0) return;
+    const currentCandles = candlesRef.current;
+    if (isAnalyzing || currentCandles.length === 0) return;
     setIsAnalyzing(true);
 
     const modelNames: Record<string, string> = {
@@ -404,7 +445,8 @@ export default function App() {
       openrouter: "OpenRouter Multi-LLM",
       consensus: "CONSENSO HÍBRIDO IA 🏆"
     };
-    const activeModelName = modelNames[settings.aiModel || "consensus"] || "Motor Inteligente";
+    const currentSettings = settingsRef.current;
+    const activeModelName = modelNames[currentSettings.aiModel || "consensus"] || "Motor Inteligente";
     setToast(`Iniciando escaneo técnico con ${activeModelName}...`, 'info');
 
     try {
@@ -412,10 +454,10 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          symbol: settings.activeAsset,
-          candles,
-          riskProfile: settings.riskProfile,
-          settings,
+          symbol: currentSettings.activeAsset,
+          candles: currentCandles,
+          riskProfile: currentSettings.riskProfile,
+          settings: currentSettings,
         }),
       });
 
@@ -424,16 +466,16 @@ export default function App() {
         setAiAnalysis(result);
         
         if (result.verdict !== 'NEUTRAL') {
-          setToast(`Señal ${result.verdict} detectada en ${settings.activeAsset} con ${result.confidence}% de confianza`, 'success');
+          setToast(`Señal ${result.verdict} detectada en ${currentSettings.activeAsset} con ${result.confidence}% de confianza`, 'success');
           
           // Automatic binary entry trigger in fully automatic mode
-          const currentSettings = settingsRef.current;
           if (currentSettings.mode === 'automatic') {
-            const lastTradeTime = lastTradeTimes[settings.activeAsset] || 0;
+            const assetTrades = tradesRef.current.filter(t => t.symbol === currentSettings.activeAsset);
+            const lastTradeTime = assetTrades.length > 0 ? Math.max(...assetTrades.map(t => typeof t.entryTime === 'number' ? t.entryTime : new Date(t.entryTime).getTime())) : 0;
             const diffSeconds = (Date.now() - lastTradeTime) / 1000;
             
             if (diffSeconds < 45) {
-              console.log(`⏳ [Cooldown] Omitiendo entrada automática en ${settings.activeAsset} (${diffSeconds.toFixed(1)}s transcurrido).`);
+              console.log(`⏳ [Cooldown] Omitiendo entrada automática en ${currentSettings.activeAsset} (${diffSeconds.toFixed(1)}s transcurrido).`);
             } else {
               executeOperation(result.verdict as TradeType, currentSettings.tradeExpiry || 60, result.reasoning || '');
             }
@@ -605,12 +647,16 @@ export default function App() {
       const tradeDocRef = doc(db, 'users', user.uid, 'trades', id);
       const userDocRef = doc(db, 'users', user.uid);
 
-      await updateDoc(tradeDocRef, {
+      const updatePayload: any = {
         status: isWin ? 'WIN' : 'LOSS',
         exitPrice,
         exitTime: Date.now(),
-        profit: isWin ? parseFloat(profit.toFixed(2)) : undefined,
-      });
+      };
+      if (isWin) {
+        updatePayload.profit = parseFloat(profit.toFixed(2));
+      }
+
+      await updateDoc(tradeDocRef, updatePayload);
 
       if (isWin) {
         const addedBalance = trade.amount + parseFloat(profit.toFixed(2));
@@ -648,12 +694,15 @@ export default function App() {
           : (matchedTrade.type === 'CALL' ? matchedTrade.entryPrice - 0.0002 : matchedTrade.entryPrice + 0.0002);
 
         const tradeDocRef = doc(db, 'users', user.uid, 'trades', result.id);
-        await updateDoc(tradeDocRef, {
+        const updatePayload: any = {
           status: result.status,
           exitPrice,
           exitTime: Date.now(),
-          profit: result.status === 'WIN' ? result.profit : undefined,
-        });
+        };
+        if (result.status === 'WIN' && result.profit !== undefined) {
+          updatePayload.profit = result.profit;
+        }
+        await updateDoc(tradeDocRef, updatePayload);
 
         if (result.status === 'WIN') {
           const addedBalance = matchedTrade.amount + result.profit;
@@ -674,19 +723,23 @@ export default function App() {
 
         const newRealTrade: Trade = {
           id: result.id,
-          symbol: result.symbol,
-          type: result.type,
-          amount: result.amount,
-          entryPrice: activePrice,
+          userId: user.uid,
+          symbol: result.symbol || settings.activeAsset || 'EUR/USD (OTC)',
+          type: result.type || 'CALL',
+          amount: result.amount || settings.tradeAmount || 1,
+          entryPrice: activePrice || 1.0,
           exitPrice,
           exitTime: Date.now(),
-          status: result.status,
+          status: result.status || 'LOSS',
           entryTime: result.time || Date.now(),
           payout: result.payout || 85,
-          profit: result.status === 'WIN' ? result.profit : undefined,
           mode: settings.mode,
           expiry: result.expiry || 60,
         };
+
+        if (result.status === 'WIN' && result.profit !== undefined) {
+          newRealTrade.profit = result.profit;
+        }
 
         const tradeDocRef = doc(db, 'users', user.uid, 'trades', result.id);
         await setDoc(tradeDocRef, newRealTrade);
