@@ -108,11 +108,24 @@ export class MarketSimulator {
           const lastClose = history[history.length - 1].close;
           const diffPct = Math.abs(lastClose - initialPrice) / initialPrice;
           
-          // If the difference is greater than 0.1%, align & reseed to ensure absolute flawless alignment
-          if (diffPct > 0.001) {
-            console.log(`📡 Aligning asset ${symbol} basePrice change from ${lastClose.toFixed(4)} to ${initialPrice.toFixed(4)}`);
+          if (diffPct > 0.01) {
+            console.log(`📡 Huge gap on alignment for asset ${symbol} basePrice change from ${lastClose.toFixed(4)} to ${initialPrice.toFixed(4)}. Reseeding!`);
             currentConfig.basePrice = initialPrice;
             this.reseedHistory(symbol, initialPrice);
+          } else {
+            const shift = initialPrice - lastClose;
+            if (Math.abs(shift) > 0.000001) {
+              console.log(`📡 Aligning asset ${symbol} candle history smoothly by shifting close values by ${shift.toFixed(5)}`);
+              for (const candle of history) {
+                candle.open += shift;
+                candle.close += shift;
+                candle.high += shift;
+                candle.low += shift;
+              }
+              // Re-enrich to recalculate indicators based on shifted close prices
+              this.candles[symbol] = enrichCandlesticks(history);
+              currentConfig.basePrice = initialPrice;
+            }
           }
         } else {
           currentConfig.basePrice = initialPrice;
@@ -127,22 +140,66 @@ export class MarketSimulator {
     // Guess reasonable values based on name
     let basePrice = initialPrice !== undefined ? initialPrice : 1.0;
     if (initialPrice === undefined) {
-      if (symbol.includes("JPY")) basePrice = 155.0;
-      else if (symbol.includes("BTC")) basePrice = 68000.0;
-      else if (symbol.includes("ETH")) basePrice = 3500.0;
-      else if (symbol.includes("BRL")) basePrice = 5.25;
-      else if (symbol.includes("INR")) basePrice = 83.50;
-      else if (symbol.includes("CAD")) basePrice = 1.36;
-      else if (symbol.includes("GBP")) basePrice = 1.26;
-      else if (symbol.includes("MXN")) basePrice = 17.50;
-      else if (symbol.includes("PHP")) basePrice = 58.00;
-      else if (symbol.includes("COP")) basePrice = 3900.00;
-      else if (symbol.includes("IDR")) basePrice = 16200.00;
-      else if (symbol.includes("VND")) basePrice = 25400.00;
-      else if (symbol.includes("ARS")) basePrice = 900.00;
-      else if (symbol.includes("RUB")) basePrice = 90.00;
-      else if (symbol.includes("GOLD") || symbol.includes("XAU")) basePrice = 2330.00;
-      else if (symbol.includes("SILVER") || symbol.includes("XAG")) basePrice = 29.50;
+      const clean = symbol.replace(" (OTC)", "").replace("-OTC", "").replace("_OTC", "").replace(" OTC", "").trim();
+      let parts = clean.split("/");
+      if (parts.length === 1 && clean.length === 6) {
+        parts = [clean.substring(0, 3), clean.substring(3, 6)];
+      }
+
+      const usdValues: Record<string, number> = {
+        "EUR": 1.085,
+        "GBP": 1.264,
+        "AUD": 0.665,
+        "NZD": 0.612,
+        "USD": 1.00,
+        "CAD": 1 / 1.365,
+        "CHF": 1 / 0.90,
+        "JPY": 1 / 156.8,
+        "BRL": 1 / 5.15,
+        "INR": 1 / 83.5,
+        "MXN": 1 / 17.5,
+        "PHP": 1 / 58.0,
+        "COP": 1 / 3900,
+        "IDR": 1 / 16200,
+        "VND": 1 / 25400,
+        "ARS": 1 / 900,
+        "RUB": 1 / 90.0,
+        "GOLD": 2330.0,
+        "XAU": 2330.0,
+        "SILVER": 29.5,
+        "XAG": 29.5,
+        "BTC": 68000.0,
+        "ETH": 3500.0,
+      };
+
+      if (parts.length === 2) {
+        const base = parts[0].toUpperCase();
+        const quote = parts[1].toUpperCase();
+
+        if (usdValues[base] !== undefined && usdValues[quote] !== undefined) {
+          basePrice = usdValues[base] / usdValues[quote];
+        } else if (usdValues[base] !== undefined) {
+          basePrice = usdValues[base];
+        }
+      } else {
+        // Fallback checks for simple legacy name inclusions
+        if (symbol.includes("JPY")) basePrice = 155.0;
+        else if (symbol.includes("BTC")) basePrice = 68000.0;
+        else if (symbol.includes("ETH")) basePrice = 3500.0;
+        else if (symbol.includes("BRL")) basePrice = 5.25;
+        else if (symbol.includes("INR")) basePrice = 83.50;
+        else if (symbol.includes("CAD") && !symbol.includes("NZD") && !symbol.includes("AUD")) basePrice = 1.36;
+        else if (symbol.includes("GBP")) basePrice = 1.26;
+        else if (symbol.includes("MXN")) basePrice = 17.50;
+        else if (symbol.includes("PHP")) basePrice = 58.00;
+        else if (symbol.includes("COP")) basePrice = 3900.00;
+        else if (symbol.includes("IDR")) basePrice = 16200.00;
+        else if (symbol.includes("VND")) basePrice = 25400.00;
+        else if (symbol.includes("ARS")) basePrice = 900.00;
+        else if (symbol.includes("RUB")) basePrice = 90.00;
+        else if (symbol.includes("GOLD") || symbol.includes("XAU")) basePrice = 2330.00;
+        else if (symbol.includes("SILVER") || symbol.includes("XAG")) basePrice = 29.50;
+      }
     }
 
     const config: MarketConfig = {
@@ -163,13 +220,15 @@ export class MarketSimulator {
     const now = Math.floor(Date.now() / 1000);
     const candleDuration = 60;
     const symbolCandles: Candlestick[] = [];
+    
+    // To ensure the current candle (index 0 / time now) is exactly startPrice, we walk backwards in price as we go backwards in time
     let currentPrice = startPrice;
 
-    for (let i = 120; i >= 0; i--) {
+    for (let i = 0; i <= 120; i++) {
       const time = now - (i * candleDuration);
-      const open = currentPrice;
+      const close = currentPrice;
       const change = (Math.random() - 0.5) * config.volatility * 4 + config.trend;
-      const close = currentPrice + change;
+      const open = close - change;
       const high = Math.max(open, close) + Math.random() * config.volatility * 2;
       const low = Math.min(open, close) - Math.random() * config.volatility * 2;
       const volume = Math.floor(Math.random() * 800) + 200;
@@ -183,14 +242,34 @@ export class MarketSimulator {
         volume,
       });
 
-      currentPrice = close;
+      // Move backward in time
+      currentPrice = open;
     }
 
+    symbolCandles.sort((a, b) => a.time - b.time);
     this.candles[symbol] = enrichCandlesticks(symbolCandles);
+  }
+
+  // Overwrites simulated candles with real candles from the Quotex websocket history
+  public overrideCandles(symbol: string, rawHistory: Candlestick[]) {
+    if (!rawHistory || rawHistory.length < 5) return;
+    this.ensureAsset(symbol, rawHistory[rawHistory.length - 1].close);
+    
+    // Sort and enrich
+    const sorted = [...rawHistory].sort((a, b) => a.time - b.time);
+    this.candles[symbol] = enrichCandlesticks(sorted);
+    
+    if (this.configs[symbol]) {
+      this.configs[symbol].basePrice = sorted[sorted.length - 1].close;
+    }
+    this.liveAssets.add(symbol);
+    this.lastInjectedTime[symbol] = Date.now();
+    console.log(`📊 [MarketSimulator] Overrode ${symbol} with ${sorted.length} real historical candles.`);
   }
 
   // Inject real price ticks directly from the Quotex active tab browser extension
   public injectPrice(symbol: string, price: number) {
+    const isFirstInjectedTick = !this.liveAssets.has(symbol);
     this.lastInjectedTime[symbol] = Date.now();
     this.liveAssets.add(symbol);
     this.ensureAsset(symbol, price);

@@ -60,10 +60,8 @@ app.get("/api/market/history/:symbol", (req, res) => {
 
 // API: Get current Quotex sync status
 app.get("/api/quotex/status", (req, res) => {
-  let totalBots = 0;
-  for (const [_, set] of botClients) {
-    totalBots += set.size;
-  }
+  const queryUserId = req.query.userId as string;
+  const totalBots = getBotsCount(queryUserId);
   const syncStatus = market.getSyncStatus();
   res.json({
     botConnected: totalBots > 0,
@@ -124,6 +122,24 @@ app.post("/api/quotex/poll", (req, res) => {
       broadcastToUserGui(userId, {
         type: "QUOTEX_TICK",
         data: { asset, price, timestamp: Date.now() }
+      });
+    }
+  }
+
+  if (type === "QUOTEX_CANDLES" && data) {
+    const { asset, candles } = data;
+    if (asset && Array.isArray(candles) && candles.length > 0) {
+      market.overrideCandles(asset, candles);
+      
+      broadcastToUserGui(userId, {
+        type: "AI_SIGNAL",
+        data: {
+          symbol: asset,
+          price: candles[candles.length - 1].close,
+          candles: candles.slice(-60),
+          isLive: true,
+          time: Math.floor(Date.now() / 1000)
+        }
       });
     }
   }
@@ -843,6 +859,27 @@ wss.on("connection", (ws, req) => {
           broadcastToUserGui(userId, {
             type: "QUOTEX_TICK",
             data: { asset, price, timestamp: Date.now() }
+          });
+        }
+      }
+
+      // Handle raw candlestick arrays from Quotex browser
+      if (parsed.type === "QUOTEX_CANDLES") {
+        const { asset, candles } = parsed.data || {};
+        if (asset && Array.isArray(candles) && candles.length > 0) {
+          market.overrideCandles(asset, candles);
+          addLog(`📊 Received ${candles.length} real candles for asset: ${asset}`);
+          
+          // Relay candles immediately to the GUI React graphs
+          broadcastToUserGui(userId, {
+            type: "AI_SIGNAL",
+            data: {
+              symbol: asset,
+              price: candles[candles.length - 1].close,
+              candles: candles.slice(-60),
+              isLive: true,
+              time: Math.floor(Date.now() / 1000)
+            }
           });
         }
       }

@@ -261,11 +261,15 @@ export const AISniper: React.FC<AISniperProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="bg-zinc-900/30 border border-zinc-900 p-3 rounded-xl">
                 <span className="text-[9px] text-zinc-500 block uppercase font-mono">Soporte Estimado</span>
-                <span className="text-xs font-mono font-bold text-zinc-300">{analysis ? analysis.supportLevel.toFixed(4) : "Cargando..."}</span>
+                <span className="text-xs font-mono font-bold text-zinc-300">
+                  {analysis && typeof analysis.supportLevel === 'number' ? analysis.supportLevel.toFixed(4) : "Cargando..."}
+                </span>
               </div>
               <div className="bg-zinc-900/30 border border-zinc-900 p-3 rounded-xl">
                 <span className="text-[9px] text-zinc-500 block uppercase font-mono">Resistencia Estimada</span>
-                <span className="text-xs font-mono font-bold text-zinc-300">{analysis ? analysis.resistanceLevel.toFixed(4) : "Cargando..."}</span>
+                <span className="text-xs font-mono font-bold text-zinc-300">
+                  {analysis && typeof analysis.resistanceLevel === 'number' ? analysis.resistanceLevel.toFixed(4) : "Cargando..."}
+                </span>
               </div>
               <div className="bg-zinc-900/30 border border-zinc-900 p-3 rounded-xl">
                 <span className="text-[9px] text-zinc-500 block uppercase font-mono">Expiración Óptima</span>

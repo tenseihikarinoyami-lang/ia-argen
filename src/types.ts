@@ -69,6 +69,8 @@ export interface SystemSettings {
   martingaleMaxSteps: number;
   mode: OperationMode;
   aiModel?: 'gemini' | 'groq' | 'deepseek' | 'openrouter' | 'consensus';
+  maxConcurrentTradesEnabled?: boolean;
+  maxConcurrentTrades?: number;
   indicators: {
     rsi: { enabled: boolean; period: number; overbought: number; oversold: number };
     ema: { enabled: boolean; fastPeriod: number; slowPeriod: number };

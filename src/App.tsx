@@ -38,22 +38,16 @@ import {
 const isValidSymbol = (sym: string): boolean => {
   if (!sym) return false;
   const upper = sym.toUpperCase().trim().split("(")[0].trim().replace("/", "");
-  const knownAssets = [
-    'EURUSD', 'GBPUSD', 'EURGBP', 'USDCAD', 'USDBRL', 'AUDUSD', 'USDJPY', 'EURJPY', 'GBPJPY', 'NZDUSD', 'AUDCAD', 'GBPCHF', 'GOLD', 'BTCUSD', 'ETHUSD', 'NZDJPY', 'USDARS', 'USDMXN'
+  const noise = [
+    "DEMO", "TRADE", "ACCOUNT", "QUOTEX", "STATUS", "LOGIN", "SUPPORT", "TOURNAMENT", "PROFILE", 
+    "SETTINGS", "DEPOSIT", "WITHDRAWAL", "BONUS", "TRANSACTION", "HISTORIAL", "DESCARGA",
+    "SWITCH", "TIME", "INVEST", "AMOUNT", "EXPIRY", "EXPIRATION", "UP", "DOWN", "CALL", 
+    "PUT", "ARRIBA", "ABAJO", "PENDING", "BALANCE", "PAYOUT", "STREAK", "HEADER", "CHART", 
+    "STRICT", "CANCEL", "BUTTON", "SELECT", "ACTIVE", "MARKET", "PROFIT", "SIGNAL"
   ];
-  if (knownAssets.includes(upper)) return true;
-  
-  // Check if standard 6-character FX pair with valid currencies
-  if (upper.length === 6) {
-    const base = upper.substring(0, 3);
-    const quote = upper.substring(3, 6);
-    const validCurrencies = [
-      "EUR", "USD", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD", "BRL", "MXN", "BTC", "ETH", "LTC", "XRP", 
-      "TRY", "INR", "IDR", "ARS", "MYR", "VND", "PHP", "THB", "KZT", "COP", "CLP", "PEN", "CNY", "RUB", "SGD", "ZAR"
-    ];
-    return validCurrencies.includes(base) && validCurrencies.includes(quote);
-  }
-  return false;
+  if (noise.includes(upper)) return false;
+  if (upper.length < 3) return false;
+  return /^[A-Z0-9/\-._() ]+$/.test(sym.toUpperCase().trim());
 };
 
 export default function App() {
@@ -83,6 +77,8 @@ export default function App() {
     martingaleMaxSteps: 2,
     mode: 'semiautomatic',
     aiModel: 'consensus',
+    maxConcurrentTradesEnabled: true,
+    maxConcurrentTrades: 3,
     indicators: {
       rsi: { enabled: true, period: 14, overbought: 70, oversold: 30 },
       ema: { enabled: true, fastPeriod: 9, slowPeriod: 21 },
@@ -169,6 +165,8 @@ export default function App() {
             !sanitizedAssets.includes(data.settings.activeAsset);
             
           const sanitizedSettings = {
+            maxConcurrentTradesEnabled: data.settings.maxConcurrentTradesEnabled !== undefined ? data.settings.maxConcurrentTradesEnabled : true,
+            maxConcurrentTrades: data.settings.maxConcurrentTrades !== undefined ? data.settings.maxConcurrentTrades : 3,
             ...data.settings,
             tradeAmount: data.settings.tradeAmount === 10 ? 1 : (data.settings.tradeAmount ?? 1),
             assets: sanitizedAssets,
@@ -275,6 +273,13 @@ export default function App() {
       }));
     }
   }, [settings.activeAsset]);
+
+  // Clear stale telemetry sync data when browser extension is reported as disconnected
+  useEffect(() => {
+    if (!botConnected) {
+      setQuotexSyncData(null);
+    }
+  }, [botConnected]);
 
   // Initial historic candles feed seed
   const fetchHistory = async (symbol: string) => {
@@ -417,7 +422,7 @@ export default function App() {
     if (!user) return;
     const updateStatus = async () => {
       try {
-        const res = await fetch('/api/quotex/status');
+        const res = await fetch(`/api/quotex/status?userId=${encodeURIComponent(user.uid || user.email || '')}`);
         if (res.ok) {
           const status = await res.json();
           setBotConnected(status.botConnected);
@@ -558,11 +563,15 @@ export default function App() {
       return;
     }
 
-    // Limit active operations to maximum 3 pending trades per asset (experienced trader preservation)
-    const activeTradesForThisAsset = trades.filter(t => t.symbol === settings.activeAsset && t.status === 'PENDING');
-    if (activeTradesForThisAsset.length >= 3) {
-      setToast(`Límite de riesgo: Ya existen 3 operaciones activas simultáneas en ${settings.activeAsset}`, 'error');
-      return;
+    // Limit active operations based on custom pending trades configuration (default 3, can be disabled or changed)
+    const concurrentEnabled = settings.maxConcurrentTradesEnabled !== false;
+    if (concurrentEnabled) {
+      const concurrentLimit = settings.maxConcurrentTrades ?? 3;
+      const activeTradesForThisAsset = tradesRef.current.filter(t => t.symbol === settings.activeAsset && t.status === 'PENDING');
+      if (activeTradesForThisAsset.length >= concurrentLimit) {
+        setToast(`Límite de riesgo: Ya existen ${concurrentLimit} operaciones activas simultáneas en ${settings.activeAsset}`, 'error');
+        return;
+      }
     }
 
     const finalExpiry = settings.tradeExpiry || expirySeconds || 60;

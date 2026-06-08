@@ -87,13 +87,13 @@ export const TechnicalChart: React.FC<TechnicalChartProps> = ({
           <p className="text-zinc-400 font-bold mb-1 border-b border-zinc-800 pb-1">VELETA {formattedTime}</p>
           <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
             <span className="text-zinc-500">Apertura:</span>
-            <span className="text-zinc-300 font-medium">{data.open.toFixed(d)}</span>
+            <span className="text-zinc-300 font-medium">{data.open != null ? data.open.toFixed(d) : '—'}</span>
             <span className="text-zinc-500">Máximo:</span>
-            <span className="text-emerald-400 font-medium">{data.high.toFixed(d)}</span>
+            <span className="text-emerald-400 font-medium">{data.high != null ? data.high.toFixed(d) : '—'}</span>
             <span className="text-zinc-500">Mínimo:</span>
-            <span className="text-rose-400 font-medium">{data.low.toFixed(d)}</span>
+            <span className="text-rose-400 font-medium">{data.low != null ? data.low.toFixed(d) : '—'}</span>
             <span className="text-zinc-500">Cierre:</span>
-            <span className="text-zinc-300 font-medium">{data.close.toFixed(d)}</span>
+            <span className="text-zinc-300 font-medium">{data.close != null ? data.close.toFixed(d) : '—'}</span>
             
             {showEMAs && (
               <>
@@ -132,7 +132,7 @@ export const TechnicalChart: React.FC<TechnicalChartProps> = ({
               isUpClose ? 'bg-emerald-950/40 text-emerald-400 border border-emerald-900/40' : 'bg-rose-950/40 text-rose-400 border border-rose-900/40'
             }`}>
               {isUpClose ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
-              {isUpClose ? '+' : ''}{changeValue.toFixed(d)}
+              {isUpClose ? '+' : ''}{(changeValue ?? 0).toFixed(d)}
             </span>
           </div>
           <p className="text-xs text-zinc-400">Grafica técnica e indicadores para binarias en tiempo real</p>
@@ -187,7 +187,7 @@ export const TechnicalChart: React.FC<TechnicalChartProps> = ({
               domain={[minVal - padding, maxVal + padding]}
               orientation="right"
               stroke="#52525b"
-              tickFormatter={(v) => v.toFixed(d)}
+              tickFormatter={(v) => typeof v === 'number' ? v.toFixed(d) : String(v)}
               tick={{ fill: '#a1a1aa', fontSize: 10, fontFamily: 'monospace' }}
               tickLine={{ stroke: '#3f3f46' }}
             />
@@ -311,7 +311,7 @@ export const TechnicalChart: React.FC<TechnicalChartProps> = ({
         {/* Large Floating live price banner on the right coordinate */}
         <div className="absolute right-1 top-[45%] bg-zinc-900 border border-zinc-700/80 rounded-l-md px-2 py-1 flex items-center justify-center font-mono text-xs font-bold text-zinc-100 z-10 border-r-0 transform shadow px-3">
           <span className="animate-pulse mr-1">●</span>
-          {activePrice.toFixed(d)}
+          {(activePrice !== undefined && activePrice !== null ? activePrice : lastCandle?.close ?? 0).toFixed(d)}
         </div>
       </div>
     </div>

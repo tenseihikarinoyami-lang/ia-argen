@@ -133,19 +133,43 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
     const tabId = Math.random().toString(36).substring(4);
     
-    // Actively track active tab state
-    const updateActiveTabInStorage = () => {
-        if (document.visibilityState === 'visible') {
-            try {
+    // Actively track active tab state via time-based leases
+    function checkActiveTabLease() {
+        try {
+            const now = Date.now();
+            const activeTabId = localStorage.getItem("argentum_active_tab_id");
+            const activeTabTime = parseInt(localStorage.getItem("argentum_active_tab_time") || "0", 10);
+            
+            const isUs = activeTabId === tabId;
+            const isLeaseActive = activeTabId && (now - activeTabTime) < 5000;
+
+            if (!isLeaseActive) {
                 localStorage.setItem("argentum_active_tab_id", tabId);
-                localStorage.setItem("argentum_active_tab_time", Date.now().toString());
-            } catch (e) {}
+                localStorage.setItem("argentum_active_tab_time", now.toString());
+                return true;
+            }
+
+            if (isUs) {
+                localStorage.setItem("argentum_active_tab_time", now.toString());
+                return true;
+            }
+
+            if (document.hasFocus() || document.visibilityState === 'visible') {
+                localStorage.setItem("argentum_active_tab_id", tabId);
+                localStorage.setItem("argentum_active_tab_time", now.toString());
+                return true;
+            }
+
+            return false;
+        } catch (e) {
+            return true;
         }
-    };
+    }
+
     try {
-        document.addEventListener('visibilitychange', updateActiveTabInStorage);
-        window.addEventListener('focus', updateActiveTabInStorage);
-        updateActiveTabInStorage();
+        document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkActiveTabLease(); });
+        window.addEventListener('focus', () => { checkActiveTabLease(); });
+        checkActiveTabLease();
     } catch (e) {}
 
     console.log("🦾 [Argentum Estricto] Inicializado con éxito. Tab ID: " + tabId + " | Protecciones Anti-Detección ACTIVAS.");
@@ -170,18 +194,31 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     function normalizeSymbol(sym) {
         if (!sym) return "";
         let upper = sym.toUpperCase();
-        let isOtc = upper.includes("OTC") || upper.includes("_OTC") || upper.includes("-OTC");
         
-        // Remove OTC and special characters to lookup in SYMBOL_MAP
         let cleanKey = upper.replace("OTC", "").replace(/[^A-Z]/g, "").trim();
+        let lastKnownCleanKey = (lastKnownAsset || "").replace("OTC", "").replace(/[^A-Z]/g, "").trim();
+
+        // Detect if active opened asset is OTC, and align if so.
+        // We only inherit OTC if the symbol matches our actively viewed asset.
+        let isOtc = upper.includes("OTC") || 
+                    upper.includes("_OTC") || 
+                    upper.includes("-OTC") || 
+                    (cleanKey === lastKnownCleanKey && (lastKnownAsset || "").toUpperCase().includes("OTC"));
+        
+        // Remove OTC suffix and special characters to lookup in SYMBOL_MAP or compute
         if (SYMBOL_MAP[cleanKey]) {
             return SYMBOL_MAP[cleanKey] + (isOtc ? " (OTC)" : "");
         }
         
-        // Extraer y procesar pares estandar FX de 6 letras sin interferencia de OTC
-        let cleanFX = upper.replace("OTC", "").replace(/[^A-Z]/g, "");
-        if (cleanFX.length === 6) {
-            const pair = cleanFX.substring(0, 3) + "/" + cleanFX.substring(3, 6);
+        // Dynamic formatting for standard 6-letter currency pairs (e.g. NZDCAD -> NZD/CAD)
+        if (cleanKey.length === 6) {
+            const pair = cleanKey.substring(0, 3) + "/" + cleanKey.substring(3, 6);
+            return pair + (isOtc ? " (OTC)" : "");
+        }
+        
+        // Handle crypto or metals (e.g. BTCUSD -> BTC/USD, ETHUSD -> ETH/USD, XAUUSD -> XAU/USD)
+        if (cleanKey.length === 5) {
+            const pair = cleanKey.substring(0, 3) + "/" + cleanKey.substring(3, 5);
             return pair + (isOtc ? " (OTC)" : "");
         }
         
@@ -201,6 +238,113 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         }
         
         return base + (isOtc ? " (OTC)" : "");
+    }
+
+    function tryParseCandleArray(arr) {
+        try {
+            const results = [];
+            for (let i = 0; i < arr.length; i++) {
+                const item = arr[i];
+                if (!item) continue;
+                
+                if (typeof item === 'object' && !Array.isArray(item)) {
+                    let time = item.time || item.t || item.timestamp;
+                    const keys = Object.keys(item).map(k => k.toLowerCase());
+                    const hasPrice = keys.some(k => k.includes('close') || k.includes('price') || k.includes('c') || k.includes('rate'));
+                    if (time && hasPrice) {
+                        let open = item.open || item.o || item.openPrice || 0;
+                        let high = item.high || item.h || item.highPrice || 0;
+                        let low = item.low || item.l || item.lowPrice || 0;
+                        let close = item.close || item.c || item.closePrice || item.price || item.rate || 0;
+                        let volume = item.volume || item.v || 100;
+                        
+                        if (time > 1000000000000) time = Math.floor(time / 1000);
+                        
+                        results.push({
+                            time: Number(time),
+                            open: Number(open),
+                            high: Number(high),
+                            low: Number(low),
+                            close: Number(close),
+                            volume: Number(volume)
+                        });
+                    }
+                } else if (Array.isArray(item) && item.length >= 5) {
+                    let time = item[0];
+                    if (typeof time === 'number' && time > 10000000) {
+                        if (time > 1000000000000) time = Math.floor(time / 1000);
+                        
+                        const nums = item.slice(1).map(Number);
+                        if (nums.some(isNaN)) continue;
+                        
+                        let o, h, l, c;
+                        if (item.length === 5) {
+                            o = nums[0];
+                            c = nums[1];
+                            h = nums[2];
+                            l = nums[3];
+                            
+                            const maxVal = Math.max(...nums);
+                            const minVal = Math.min(...nums);
+                            h = maxVal;
+                            l = minVal;
+                        } else if (item.length >= 6) {
+                            o = nums[0];
+                            h = nums[1];
+                            l = nums[2];
+                            c = nums[3];
+                        } else {
+                            continue;
+                        }
+                        
+                        results.push({
+                            time: Number(time),
+                            open: Number(o),
+                            high: Number(h),
+                            low: Number(l),
+                            close: Number(c),
+                            volume: 100
+                        });
+                    }
+                }
+            }
+            if (results.length >= 5) {
+                results.sort((a, b) => a.time - b.time);
+                return results;
+            }
+        } catch(e) {
+            console.error("Error parsing candle array:", e);
+        }
+        return null;
+    }
+
+    function extractCandlesFromMessage(obj) {
+        if (!obj || typeof obj !== 'object') return null;
+        if (Array.isArray(obj)) {
+            if (obj.length >= 10) {
+                const parsed = tryParseCandleArray(obj);
+                if (parsed) return parsed;
+            }
+            for (const item of obj) {
+                const found = extractCandlesFromMessage(item);
+                if (found) return found;
+            }
+        } else {
+            for (const key of Object.keys(obj)) {
+                const val = obj[key];
+                if (key === "candles" || key === "history" || key === "data" || key === "chart") {
+                    if (Array.isArray(val) && val.length >= 10) {
+                        const parsed = tryParseCandleArray(val);
+                        if (parsed) return parsed;
+                    }
+                }
+                if (val && typeof val === "object") {
+                    const found = extractCandlesFromMessage(val);
+                    if (found) return found;
+                }
+            }
+        }
+        return null;
     }
 
     function handleQuotexNativeWSMessage(rawString) {
@@ -267,35 +411,90 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         }
         
         if (!parsedData) return;
+
+        // Intentar interceptar velas históricas reales de Quotex
+        try {
+            const interceptedCandles = extractCandlesFromMessage(parsedData);
+            if (interceptedCandles && interceptedCandles.length >= 10) {
+                console.log("📊 [Argentum] ¡Interceptadas " + interceptedCandles.length + " velas históricas reales!");
+                pushData("QUOTEX_CANDLES", {
+                    asset: lastKnownAsset || liveInterceptedAsset || "EUR/USD (OTC)",
+                    candles: interceptedCandles
+                });
+            }
+        } catch (candleErr) {
+            console.warn("⚠️ [Argentum] Error al descifrar velas históricas:", candleErr);
+        }
         
-        if (Array.isArray(parsedData)) {
-            const [eventName, eventData] = parsedData;
-            
-            if ((eventName === "tick" || eventName === "price" || eventName === "quote" || eventName === "ticks") && eventData) {
-                let symbol = eventData.symbol || eventData.asset || eventData.pair;
-                let price = eventData.price || eventData.rate || eventData.close || eventData.value;
-                if (symbol && typeof price === "number") {
-                    onRealLiveTickDetected(symbol, price);
+        // Recursive search helper for asset and price
+        function findAssetAndPrice(obj, result = { asset: null, price: null }) {
+            if (!obj || typeof obj !== 'object') return result;
+            if (Array.isArray(obj)) {
+                for (const item of obj) {
+                    findAssetAndPrice(item, result);
+                }
+            } else {
+                const keys = Object.keys(obj);
+                for (const k of keys) {
+                    const lowerK = k.toLowerCase();
+                    const val = obj[k];
+                    if ((lowerK === "symbol" || lowerK === "asset" || lowerK === "pair" || lowerK === "symbolid") && typeof val === "string") {
+                        result.asset = val;
+                    }
+                    if ((lowerK === "price" || lowerK === "rate" || lowerK === "close" || lowerK === "last" || lowerK === "value") && typeof val === "number") {
+                        result.price = val;
+                    }
+                    // Crucial: Fallback for direct "{ 'EURUSD_otc': 1.08245 }" style ticker updates
+                    if (typeof val === "number" && val > 0 && val < 500000) {
+                        const cleanK = k.toUpperCase().replace("OTC", "").replace(/[^A-Z]/g, "").trim();
+                        const lastKnownCleanKey = (lastKnownAsset || "").toUpperCase().replace("OTC", "").replace(/[^A-Z]/g, "").trim();
+                        if (cleanK.length === 6 && (cleanK === lastKnownCleanKey || SYMBOL_MAP[cleanK])) {
+                            result.asset = k;
+                            result.price = val;
+                        }
+                    }
+                    if (val && typeof val === "object") {
+                        findAssetAndPrice(val, result);
+                    }
                 }
             }
-            
-            if ((eventName === "balance" || eventName === "settings" || eventName === "account" || eventName === "user") && eventData) {
-                let balance = eventData.balance !== undefined ? eventData.balance : (eventData.demo_balance || eventData.live_balance);
-                if (typeof balance === "number") {
-                    onRealLiveBalanceDetected(balance, eventData.isDemo || eventData.demo || false);
+            return result;
+        }
+
+        // Recursive search helper for balance
+        function findBalanceAndDemo(obj) {
+            if (!obj || typeof obj !== 'object') return null;
+            if (Array.isArray(obj)) {
+                for (const item of obj) {
+                    const res = findBalanceAndDemo(item);
+                    if (res) return res;
+                }
+            } else {
+                const keys = Object.keys(obj);
+                for (const k of keys) {
+                    const lowerK = k.toLowerCase();
+                    const val = obj[k];
+                    if ((lowerK === "balance" || lowerK === "demo_balance" || lowerK === "live_balance") && typeof val === "number") {
+                        const isDemo = !!(obj.isDemo || obj.demo || lowerK.includes("demo"));
+                        return { balance: val, isDemo };
+                    }
+                    if (val && typeof val === "object") {
+                        const res = findBalanceAndDemo(val);
+                        if (res) return res;
+                    }
                 }
             }
-        } else if (typeof parsedData === "object") {
-            let symbol = parsedData.symbol || parsedData.asset || parsedData.pair || parsedData.symbolId;
-            let price = parsedData.price || parsedData.rate || parsedData.close || parsedData.value || parsedData.last;
-            if (symbol && typeof price === "number") {
-                onRealLiveTickDetected(symbol, price);
-            }
-            
-            let balance = parsedData.balance !== undefined ? parsedData.balance : (parsedData.demo_balance || parsedData.live_balance);
-            if (typeof balance === "number") {
-                onRealLiveBalanceDetected(balance, parsedData.isDemo || parsedData.demo || false);
-            }
+            return null;
+        }
+
+        const extData = findAssetAndPrice(parsedData);
+        if (extData.asset && typeof extData.price === "number") {
+            onRealLiveTickDetected(extData.asset, extData.price);
+        }
+
+        const extBal = findBalanceAndDemo(parsedData);
+        if (extBal) {
+            onRealLiveBalanceDetected(extBal.balance, extBal.isDemo);
         }
     }
 
@@ -375,6 +574,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     let reconnectDelay = 1000;
 
     function pushData(type, payloadData) {
+        // Multi-tab telemetry gate: Prevent background tabs from spamming or hijacking states
+        if (type === "QUOTEX_SYNC" || type === "QUOTEX_TICK" || type === "QUOTEX_CANDLES") {
+            if (!checkActiveTabLease()) {
+                return;
+            }
+        }
+
         const payload = {
             userId: USER_ID,
             type: type,
@@ -406,6 +612,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                             showStatusBanner("✅ ENLACE HTTP ACTIVO (CSP BYPASS)", "#10b981");
                             
                             if (res.commands && res.commands.length > 0) {
+                                // Multi-tab command gate: Skip executions if this tab is not active
+                                if (!checkActiveTabLease()) {
+                                    console.log("⏸️ [Argentum Sync] Ignorando comandos HTTP: Esta no es la pestaña activa.");
+                                    return;
+                                }
+
                                 for (const cmd of res.commands) {
                                     console.log("📨 [HTTP Polling] Comando recibido:", cmd);
                                     if (cmd.type === 'EXECUTE_TRADE') {
@@ -447,6 +659,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
         socket.onmessage = (event) => {
             try {
+                // Multi-tab command gate: Skip executions if this tab is not active
+                if (!checkActiveTabLease()) {
+                    console.log("⏸️ [Argentum Sync] Ignorando comando WS: Esta no es la pestaña activa.");
+                    return;
+                }
+
                 const message = JSON.parse(event.data);
                 console.log("📨 [Argentum Estricto] Mensaje recibido:", message);
 
@@ -911,22 +1129,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         const isValidSymbol = (sym) => {
             if (!sym) return false;
             const upper = sym.toUpperCase().trim().split("(")[0].trim().replace("/", "");
-            const knownAssets = [
-              'EURUSD', 'GBPUSD', 'EURGBP', 'USDCAD', 'USDBRL', 'AUDUSD', 'USDJPY', 'EURJPY', 'GBPJPY', 'NZDUSD', 'AUDCAD', 'GBPCHF', 'GOLD', 'BTCUSD', 'ETHUSD', 'NZDJPY', 'USDARS', 'USDMXN'
+            const noise = [
+                "DEMO", "TRADE", "ACCOUNT", "QUOTEX", "STATUS", "LOGIN", "SUPPORT", "TOURNAMENT", "PROFILE", 
+                "SETTINGS", "DEPOSIT", "WITHDRAWAL", "BONUS", "TRANSACTION", "HISTORIAL", "DESCARGA",
+                "SWITCH", "TIME", "INVEST", "AMOUNT", "EXPIRY", "EXPIRATION", "UP", "DOWN", "CALL", 
+                "PUT", "ARRIBA", "ABAJO", "PENDING", "BALANCE", "PAYOUT", "STREAK", "HEADER", "CHART", 
+                "STRICT", "CANCEL", "BUTTON", "SELECT", "ACTIVE", "MARKET", "PROFIT", "SIGNAL"
             ];
-            if (knownAssets.includes(upper)) return true;
-            
-            // Check if standard 6-character FX pair with valid currencies
-            if (upper.length === 6) {
-                const base = upper.substring(0, 3);
-                const quote = upper.substring(3, 6);
-                const validCurrencies = [
-                    "EUR", "USD", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD", "BRL", "MXN", "BTC", "ETH", "LTC", "XRP", 
-                    "TRY", "INR", "IDR", "ARS", "MYR", "VND", "PHP", "THB", "KZT", "COP", "CLP", "PEN", "CNY", "RUB", "SGD", "ZAR"
-                ];
-                return validCurrencies.includes(base) && validCurrencies.includes(quote);
-            }
-            return false;
+            if (noise.includes(upper)) return false;
+            if (upper.length < 3) return false;
+            return /^[A-Z0-9\\/._() -]+$/.test(sym.toUpperCase().trim());
         };
 
         // Persistent cache to preserve previous validated asset state during transient loading phases
@@ -937,7 +1149,81 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         }
 
         const getLivePrice = () => {
+            const getPriceRange = (assetName) => {
+                const cleanSym = (assetName || "").toUpperCase().replace(/\\s+/g, '').split('(')[0].replace("/", "");
+                if (cleanSym.includes("BTC")) {
+                    return { min: 20000, max: 250000 };
+                }
+                if (cleanSym.includes("ETH")) {
+                    return { min: 1000, max: 10000 };
+                }
+                if (cleanSym.includes("GOLD") || cleanSym.includes("XAU")) {
+                    return { min: 1500, max: 3500 };
+                }
+                if (cleanSym.includes("SILVER") || cleanSym.includes("XAG")) {
+                    return { min: 15, max: 50 };
+                }
+                if (cleanSym.includes("JPY")) {
+                    return { min: 70, max: 280 };
+                }
+                if (cleanSym.includes("BRL")) {
+                    return { min: 0.1, max: 7.5 };
+                }
+                if (cleanSym.includes("ARS")) {
+                    return { min: 200, max: 1500 };
+                }
+                if (cleanSym.includes("MXN")) {
+                    return { min: 10, max: 35 };
+                }
+                if (cleanSym.includes("RUB") || cleanSym.includes("INR")) {
+                    return { min: 40, max: 150 };
+                }
+                if (cleanSym.includes("PHP")) {
+                    return { min: 30, max: 90 };
+                }
+                if (cleanSym.includes("COP")) {
+                    return { min: 2000, max: 5500 };
+                }
+                if (cleanSym.includes("IDR")) {
+                    return { min: 8000, max: 22000 };
+                }
+                if (cleanSym.includes("VND")) {
+                    return { min: 12000, max: 30000 };
+                }
+                // Standard FX pairs (EUR, GBP, USD, CAD, AUD, NZD, CHF)
+                return { min: 0.3, max: 3.5 };
+            };
+
+            const range = getPriceRange(lastKnownAsset);
+
+            const isValidPrice = (val, rawText) => {
+                if (isNaN(val) || val <= 0 || val > 1000000) return false;
+                
+                // Allow a generous range based on matched asset type, or default to general acceptable range
+                const minPrice = range ? range.min : 0.1;
+                const maxPrice = range ? range.max : 250000;
+                if (val < minPrice || val > maxPrice) return false;
+
+                if (rawText.includes('%') || rawText.includes(':') || rawText.includes('$') || rawText.toLowerCase().includes('demo') || rawText.toLowerCase().includes('live')) return false;
+                return true;
+            };
+
+            // Priority: Try to pull price from document.title first which often has form "CAD/JPY (OTC) 116.413"
+            try {
+                const titleText = (document.title || "").replace(/\\s+/g, '');
+                const titleMatches = titleText.match(/\\d+\\.\\d+/g);
+                if (titleMatches) {
+                    for (const matchStr of titleMatches) {
+                        const val = parseFloat(matchStr);
+                        if (isValidPrice(val, document.title)) {
+                            return val;
+                        }
+                    }
+                }
+            } catch(e) {}
+
             const specificSelectors = [
+                // Axis current price label
                 '.chart-container .price-label',
                 '[class*="price-label"]',
                 '.current-price-label',
@@ -949,15 +1235,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 '[class*="current-price"]',
                 '[class*="chart-price"]',
                 '.price-value',
-                '[class*="price-value"]'
+                '[class*="price-value"]',
+                '.current-price',
+                '.chart-current-price',
+                '.price-cursor',
+                '[class*="active-price"]',
+                '.active-price'
             ];
-
-            const isValidPrice = (val, rawText) => {
-                if (isNaN(val) || val <= 0 || val > 1000000) return false;
-                if (rawText.includes('%') || rawText.includes(':') || rawText.includes('$') || rawText.toLowerCase().includes('demo') || rawText.toLowerCase().includes('live')) return false;
-                if (!rawText.includes('.')) return false;
-                return true;
-            };
 
             for (const sel of specificSelectors) {
                 try {
@@ -966,31 +1250,85 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                         if (!el) continue;
                         const txt = (el.textContent || "").trim();
                         if (!txt) continue;
+                        
+                        // Try matching floats inside cleaned text (handles multiple nested formatting spans)
+                        const cleaned = txt.replace(/\\s+/g, '');
+                        const matches = cleaned.match(/\\d+\\.\\d+/g);
+                        if (matches) {
+                            for (const s of matches) {
+                                const val = parseFloat(s);
+                                if (isValidPrice(val, txt)) {
+                                    return val;
+                                }
+                            }
+                        }
+                        
+                        // Fallback: strip non-numeric and parse
                         const cleanStr = txt.replace(/[^0-9.]/g, '');
-                        if (!cleanStr) continue;
-                        const val = parseFloat(cleanStr);
-                        if (isValidPrice(val, txt)) {
-                            return val;
+                        if (cleanStr) {
+                            const val = parseFloat(cleanStr);
+                            if (isValidPrice(val, txt)) {
+                                return val;
+                            }
                         }
                     }
                 } catch(e) {}
             }
 
-            // High priority lightweight fallback selectors
+            // High priority lightweight fallback selectors on common classes
             try {
-                const candidates = document.querySelectorAll('[class*="price"], [class*="ticker"], [class*="value"]');
+                const candidates = document.querySelectorAll('[class*="price"], [class*="ticker"], [class*="value"], [class*="label"], [class*="cursor"]');
                 for (const el of candidates) {
-                    if (!el || el.children.length > 1) continue;
+                    if (!el) continue;
+                    // Avoid checking gigantic containers to maintain incredible performance profile
+                    if (el.children.length > 5) continue; 
                     if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
+                    
                     const txt = (el.textContent || "").trim();
+                    const cleaned = txt.replace(/\\s+/g, '');
+                    const matches = cleaned.match(/\\d+\\.\\d+/g);
+                    if (matches) {
+                        for (const s of matches) {
+                            const val = parseFloat(s);
+                            if (isValidPrice(val, txt)) {
+                                return val;
+                            }
+                        }
+                    }
+                    
                     const cleanStr = txt.replace(/[^0-9.]/g, '');
-                    if (!cleanStr) continue;
                     const val = parseFloat(cleanStr);
                     if (isValidPrice(val, txt)) {
                         return val;
                     }
                 }
             } catch(e) {}
+
+            // Ultimate fallback: Scan all common small structural text elements (supports split numbers like <span>116</span><span>.413</span>)
+            try {
+                const allLeafs = document.querySelectorAll('span, div, p, strong, b');
+                for (const el of allLeafs) {
+                    if (!el) continue;
+                    // Permit up to 3 children nodes to support split nested tags
+                    if (el.children.length > 3) continue;
+                    if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
+                    
+                    const txt = (el.textContent || "").trim();
+                    if (!txt || txt.includes('%') || txt.includes(':') || txt.includes('$') || txt.includes('€') || txt.includes('£')) continue;
+                    if (txt.toLowerCase().includes('demo') || txt.toLowerCase().includes('live')) continue;
+                    
+                    const cleaned = txt.replace(/\\s+/g, '');
+                    const matches = cleaned.match(/\\d+\\.\\d+/g);
+                    if (matches) {
+                        for (const s of matches) {
+                            const val = parseFloat(s);
+                            if (isValidPrice(val, txt)) {
+                                return val;
+                            }
+                        }
+                    }
+                }
+            } catch (err) {}
 
             return null;
         };
@@ -1084,7 +1422,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     return val;
                 }
             }
-            const simpleMatches = text.match(/[0-9]+(?:\.[0-9]+)?/g);
+            const simpleMatches = text.match(/[0-9]+(?:\\.[0-9]+)?/g);
             if (simpleMatches && simpleMatches.length > 0) {
                 const lastSimple = parseFloat(simpleMatches[simpleMatches.length - 1]);
                 if (!isNaN(lastSimple) && lastSimple >= 0) {
@@ -1259,22 +1597,10 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 };
 
                 // Multi-tab sync gate: Prevent background instances from spamming state updates
-                try {
-                    if (document.visibilityState === 'visible') {
-                        localStorage.setItem("argentum_active_tab_id", tabId);
-                        localStorage.setItem("argentum_active_tab_time", Date.now().toString());
-                    } else {
-                        const activeTabId = localStorage.getItem("argentum_active_tab_id");
-                        const activeTabTime = parseInt(localStorage.getItem("argentum_active_tab_time") || "0", 10);
-                        const now = Date.now();
-                        
-                        // If there is another active tab that was updated recently (< 5 seconds ago), and it isn't us, then yield.
-                        if (activeTabId && activeTabId !== tabId && (now - activeTabTime) < 5000) {
-                            console.log("⏸️ [Argentum Sync] Yielding synchronization payload: Another active tab has focus (" + activeTabId + ").");
-                            return;
-                        }
-                    }
-                } catch (e) {}
+                if (!checkActiveTabLease()) {
+                    console.log("⏸️ [Argentum Sync] Yielding synchronization payload: Another active tab has focus.");
+                    return;
+                }
 
                 const detectedAsset = getActiveAsset();
                 if (detectedAsset) {
@@ -1658,6 +1984,53 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 />
                 <span className="bg-zinc-900 border border-zinc-800 px-2.5 py-1.5 rounded-lg text-rose-400 font-bold text-xs flex items-center justify-center">SL</span>
               </div>
+            </div>
+          </div>
+
+          {/* NEW: Concurrency Limits Option */}
+          <div className="pt-3 border-t border-zinc-900">
+            <h4 className="text-[11px] font-bold text-zinc-400 uppercase font-mono tracking-wider mb-2.5">Gestión de Operaciones Simultáneas</h4>
+            <div className="bg-zinc-900/30 border border-zinc-900 rounded-xl p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-bold text-zinc-200 block">Restricción de Cantidad Regulada</span>
+                  <p className="text-[10px] text-zinc-500 leading-tight mt-0.5">
+                    Evita que el bot meta demasiadas operaciones a la vez en el mismo activo para proteger tu cuenta de ráfagas.
+                  </p>
+                </div>
+                <div className="relative">
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      id="max-concurrent-trades-toggle"
+                      type="checkbox"
+                      checked={settings.maxConcurrentTradesEnabled !== false}
+                      onChange={(e) => setSettings({ ...settings, maxConcurrentTradesEnabled: e.target.checked })}
+                      className="sr-only peer"
+                    />
+                    <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-zinc-100 after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                  </label>
+                </div>
+              </div>
+
+              {(settings.maxConcurrentTradesEnabled !== false) && (
+                <div className="pt-2.5 border-t border-zinc-900/50 flex items-center justify-between gap-4">
+                  <span className="text-[10px] uppercase font-mono tracking-wider text-zinc-400">Canales Máximos Permitidos</span>
+                  <div className="flex items-center gap-3 bg-zinc-900/60 px-2.5 py-1 rounded-lg border border-zinc-800 w-1/2 justify-between">
+                    <input
+                      id="max-concurrent-trades-input"
+                      type="range"
+                      min="1"
+                      max="10"
+                      value={settings.maxConcurrentTrades ?? 3}
+                      onChange={(e) => setSettings({ ...settings, maxConcurrentTrades: Number(e.target.value) })}
+                      className="accent-indigo-500 w-full cursor-pointer h-1 bg-zinc-800 rounded-lg appearance-none"
+                    />
+                    <span className="text-xs font-mono font-bold text-zinc-200 whitespace-nowrap min-w-[36px] text-right">
+                      {settings.maxConcurrentTrades ?? 3} Op.
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
